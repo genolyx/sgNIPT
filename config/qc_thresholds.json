@@ -1,0 +1,33 @@
+{
+    "fastq_qc": {
+        "min_total_reads": 1000000,
+        "min_q30_rate": 0.80,
+        "min_q20_rate": 0.90,
+        "max_duplication_rate": 0.50,
+        "min_mean_quality_after_filter": 25.0,
+        "max_adapter_trimmed_rate": 0.30,
+        "min_reads_after_filter": 500000
+    },
+    "bam_qc": {
+        "min_mapping_rate": 0.90,
+        "min_on_target_rate": 0.50,
+        "max_duplicate_rate": 0.50,
+        "min_mean_target_coverage": 100.0,
+        "min_target_coverage_uniformity": 0.20,
+        "min_insert_size_median": 100,
+        "max_insert_size_median": 300,
+        "min_properly_paired_rate": 0.80
+    },
+    "fetal_fraction": {
+        "min_depth": 50,
+        "min_minor_af": 0.005,
+        "max_minor_af": 0.25,
+        "min_informative_snps": 10,
+        "min_fetal_fraction": 0.02,
+        "max_fetal_fraction": 0.50,
+        "bootstrap_iterations": 1000,
+        "outlier_sd_threshold": 3.0,
+        "min_base_quality": 20,
+        "min_mapping_quality": 30
+    }
+}

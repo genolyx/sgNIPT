@@ -1,0 +1,11 @@
+#chrom	start	end	name	score	strand	gene	disease	pathogenic_variant
+chr7	117559590	117559790	CFTR_F508del	.	+	CFTR	Cystic_Fibrosis	c.1521_1523delCTT
+chr7	117587738	117587938	CFTR_G542X	.	+	CFTR	Cystic_Fibrosis	c.1624G>T
+chr7	117587808	117588008	CFTR_G551D	.	+	CFTR	Cystic_Fibrosis	c.1652G>A
+chr11	5226774	5226974	HBB_E6V	.	-	HBB	Sickle_Cell_Disease	c.20A>T
+chr11	5226970	5227170	HBB_IVS1_110	.	-	HBB	Beta_Thalassemia	c.93-21G>A
+chr11	5225464	5225664	HBB_CD41_42	.	-	HBB	Beta_Thalassemia	c.126_129delCTTT
+chr5	13702620	13702820	SMN1_Ex7	.	+	SMN1	Spinal_Muscular_Atrophy	Exon7_deletion
+chr5	13715068	13715268	SMN1_Ex8	.	+	SMN1	Spinal_Muscular_Atrophy	Exon8_deletion
+chr13	32315474	32315674	BRCA2_6174delT	.	+	BRCA2	Hereditary_Breast_Cancer	c.5946delT
+chrX	31137345	31137545	DMD_Ex45	.	-	DMD	Duchenne_Muscular_Dystrophy	Exon45_deletion

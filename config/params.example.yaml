@@ -1,0 +1,48 @@
+# ============================================================================
+#  Single Gene NIPT Pipeline - Example Parameters File
+# ============================================================================
+#  Usage: nextflow run main.nf -params-file conf/params.example.yaml
+# ============================================================================
+
+# ── Input / Output ───────────────────────────────────────────────────────────
+input: "/path/to/samplesheet.csv"
+outdir: "/path/to/results"
+target_bed: "/path/to/target_panel.bed"
+
+# ── Reference Genome (hg38) ─────────────────────────────────────────────────
+reference_fasta: "/path/to/hg38/hg38.fa"
+bwa_index_dir: "/path/to/hg38/bwa-mem2-index"
+
+# ── Preprocessing ────────────────────────────────────────────────────────────
+fastp_qualified_quality: 15
+fastp_min_length: 36
+# fastp_extra_args: "--cut_front --cut_tail --cut_window_size 4 --cut_mean_quality 20"
+
+# ── Alignment ────────────────────────────────────────────────────────────────
+min_mapping_quality: 30
+min_base_quality: 20
+use_picard_markdup: false
+# bwa_extra_args: "-M"
+
+# ── Fetal Fraction ───────────────────────────────────────────────────────────
+ff_variant_caller: "bcftools"     # Options: bcftools, freebayes
+ff_min_alt_fraction: 0.005
+ff_min_alt_count: 2
+ff_max_reads: 10000000
+mpileup_max_depth: 10000
+# ff_config: "/path/to/ff_config.json"
+
+# ── Variant Calling ──────────────────────────────────────────────────────────
+variant_caller: "bcftools"        # Options: bcftools, freebayes, gatk
+vc_min_alt_fraction: 0.005
+vc_min_alt_count: 2
+vc_min_depth: 50
+
+# ── Variant Annotation (optional) ───────────────────────────────────────────
+run_annotation: false
+# annotation_tool: "snpsift"
+# clinvar_vcf: "/path/to/clinvar.vcf.gz"
+
+# ── QC Thresholds (optional, uses defaults if not specified) ─────────────────
+# fastq_qc_thresholds: "/path/to/fastq_qc_thresholds.json"
+# bam_qc_thresholds: "/path/to/bam_qc_thresholds.json"

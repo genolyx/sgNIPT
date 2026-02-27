@@ -1,0 +1,4 @@
+sample_id,fastq_1,fastq_2
+NIPT_001,/path/to/NIPT_001_R1.fastq.gz,/path/to/NIPT_001_R2.fastq.gz
+NIPT_002,/path/to/NIPT_002_R1.fastq.gz,/path/to/NIPT_002_R2.fastq.gz
+NIPT_003,/path/to/NIPT_003_R1.fastq.gz,/path/to/NIPT_003_R2.fastq.gz

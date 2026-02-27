@@ -1,0 +1,36 @@
+name: single-gene-nipt
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  # ── Core tools ─────────────────────────────────────────────────────────
+  - python>=3.9
+  - nextflow>=23.04
+  
+  # ── Preprocessing ──────────────────────────────────────────────────────
+  - fastp>=0.23
+  
+  # ── Alignment ──────────────────────────────────────────────────────────
+  - bwa-mem2>=2.2
+  - samtools>=1.17
+  - picard>=3.0
+  
+  # ── Variant Calling ────────────────────────────────────────────────────
+  - bcftools>=1.17
+  - freebayes>=1.3
+  # - gatk4>=4.4  # Uncomment if using GATK Mutect2
+  
+  # ── Coverage Analysis ──────────────────────────────────────────────────
+  - mosdepth>=0.3
+  
+  # ── QC Aggregation ─────────────────────────────────────────────────────
+  - multiqc>=1.14
+  
+  # ── Annotation (optional) ──────────────────────────────────────────────
+  # - snpsift>=5.1
+  
+  # ── Python dependencies ────────────────────────────────────────────────
+  - pip:
+    - numpy
+    - pandas

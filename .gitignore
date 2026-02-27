@@ -1,0 +1,27 @@
+# Runtime directories (YYMM pattern)
+fastq/
+analysis/
+output/
+log/
+
+# Data directory (host-specific reference files)
+data/
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Nextflow
+.nextflow/
+.nextflow.log*
+work/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
