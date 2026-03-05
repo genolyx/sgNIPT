@@ -2,6 +2,11 @@
  * ============================================================================
  *  Module: variant_calling.nf
  *  Description: Variant calling at target loci and fetal variant analysis
+ *
+ *  Panel: Twist UCL_SingleGeneNIPT TE-96276661 (hg38)
+ *  - Uses All_target_regions BED for variant calling
+ *  - Zero-probe region flagging for 29 uncovered target regions
+ *  - Gene list validation against singleGene_NIPT gene list
  * ============================================================================
  */
 
@@ -11,8 +16,7 @@ process VARIANT_CALL_TARGET {
     publishDir "${params.outdir}/${sample_id}/variants", mode: 'copy'
 
     input:
-    tuple val(sample_id), path(bam)
-    tuple val(sample_id), path(bai)
+    tuple val(sample_id), path(bam), path(bai)
     path(target_bed)
     path(reference_fasta)
     path(reference_fai)
@@ -149,12 +153,17 @@ process VARIANT_ANALYSIS {
     tuple val(sample_id), path(vcf)
     tuple val(sample_id), path(ff_json)
     path(target_bed)
+    path(zero_probe_bed)
+    path(gene_list)
 
     output:
     tuple val(sample_id), path("${sample_id}.variant_report.json"), emit: variant_report
 
     script:
-    def config_arg = params.variant_analysis_config ? "--config ${params.variant_analysis_config}" : ""
+    def config_arg    = params.variant_analysis_config ? "--config ${params.variant_analysis_config}" : ""
+    def zero_arg      = zero_probe_bed.name != 'NO_ZERO_PROBE_BED' ? "--zero-probe-bed ${zero_probe_bed}" : ""
+    def gene_list_arg = gene_list.name != 'NO_GENE_LIST' ? "--gene-list ${gene_list}" : ""
+
     """
     # Extract fetal fraction value from JSON
     FF=\$(python3 -c "import json; d=json.load(open('${ff_json}')); print(d.get('primary_fetal_fraction', 0.05))")
@@ -164,6 +173,8 @@ process VARIANT_ANALYSIS {
         --vcf ${vcf} \\
         --target-bed ${target_bed} \\
         --fetal-fraction \${FF} \\
+        ${zero_arg} \\
+        ${gene_list_arg} \\
         ${config_arg} \\
         --output ${sample_id}.variant_report.json
     """

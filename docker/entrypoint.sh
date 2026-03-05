@@ -11,6 +11,14 @@
 #    - Writes {ORDER_ID}_progress.txt for real-time progress tracking
 #    - daemon polls for JSON+TAR presence to detect completion
 #
+#  Panel: Twist UCL_SingleGeneNIPT_TE-96276661_hg38
+#    - Auto-detects BED files in data directory:
+#      * target_bed/All_target_regions*.bed  → Variant calling & QC
+#      * target_bed/ff_snps*.bed             → Fetal Fraction SNP list
+#      * target_bed/Probes_merged*.bed       → Probe coverage QC
+#      * target_bed/Target_regions_with_zero_probes*.bed → Zero-probe flagging
+#      * target_bed/gene_list*.tsv           → Gene list validation
+#
 #  Usage (inside docker run):
 #    --order_id        ORDER_ID        (required)
 #    --sample_name     SAMPLE_NAME     (required, comma-separated for multi-sample)
@@ -33,7 +41,7 @@ OUTPUT_DIR="/Work/SgNIPT/output"
 LOG_DIR="/Work/SgNIPT/log"
 
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
-PIPELINE_VERSION="1.0.0"
+PIPELINE_VERSION="1.1.0"
 
 # ── Logging functions ────────────────────────────────────────────────────────
 log_info()  { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO]  $*" | tee -a "${LOG_DIR}/entrypoint.log"; }
@@ -98,6 +106,7 @@ mkdir -p "${ORDER_OUTPUT_DIR}" "${ORDER_LOG_DIR}" "${WORK_DIR}"
 
 log_info "============================================================"
 log_info "  Single Gene NIPT Pipeline v${PIPELINE_VERSION} - Starting"
+log_info "  Panel: Twist UCL_SingleGeneNIPT_TE-96276661 (hg38)"
 log_info "============================================================"
 log_info "Order ID       : ${ORDER_ID}"
 log_info "Sample Names   : ${SAMPLE_NAMES}"
@@ -136,20 +145,75 @@ if [[ ! -d "$BWA_INDEX_DIR" ]]; then
 fi
 log_info "BWA Index Dir  : ${BWA_INDEX_DIR}"
 
-# Target BED
+# ── Detect BED files (Twist panel-specific) ──────────────────────────────────
+log_info "Detecting Twist panel BED files in ${DATA_DIR}/target_bed/ ..."
+update_progress "INIT" "Detecting Twist panel BED files"
+
+BED_DIR="${DATA_DIR}/target_bed"
+
+# 1. Target BED (All_target_regions) — primary target for variant calling & QC
 if [[ -n "$TARGET_BED_NAME" ]]; then
-    TARGET_BED="${DATA_DIR}/target_bed/${TARGET_BED_NAME}"
+    TARGET_BED="${BED_DIR}/${TARGET_BED_NAME}"
 else
-    TARGET_BED=$(find "${DATA_DIR}/target_bed" -name "*.bed" 2>/dev/null | head -1)
+    TARGET_BED=$(find "${BED_DIR}" -name "All_target_regions*.bed" 2>/dev/null | head -1)
+    if [[ -z "$TARGET_BED" ]]; then
+        TARGET_BED=$(find "${BED_DIR}" -name "*.bed" -not -name "Probes*" -not -name "Target_bases*" -not -name "Target_regions_with_zero*" -not -name "ff_snps*" 2>/dev/null | head -1)
+    fi
 fi
 if [[ -z "$TARGET_BED" ]] || [[ ! -f "$TARGET_BED" ]]; then
-    log_error "Target BED file not found in ${DATA_DIR}/target_bed/"
+    log_error "Target BED file not found in ${BED_DIR}/"
     update_progress "ERROR" "Target BED file not found"
     exit 1
 fi
 log_info "Target BED     : ${TARGET_BED}"
 
-update_progress "INIT" "Reference files detected successfully"
+# 2. FF SNPs BED — common SNP positions for Fetal Fraction estimation
+FF_SNPS_BED=$(find "${BED_DIR}" -name "ff_snps*.bed" 2>/dev/null | head -1)
+FF_SNPS_ARG=""
+if [[ -n "$FF_SNPS_BED" ]] && [[ -f "$FF_SNPS_BED" ]]; then
+    FF_SNPS_ARG="--ff_snps_bed ${FF_SNPS_BED}"
+    log_info "FF SNPs BED    : ${FF_SNPS_BED}"
+else
+    log_warn "FF SNPs BED not found. Using target_bed for FF estimation."
+    log_warn "  → For better FF accuracy, create ff_snps_<name>.bed with common SNPs (MAF>5%)"
+fi
+
+# 3. Probes BED — probe coverage QC
+PROBES_BED=$(find "${BED_DIR}" -name "Probes_merged*.bed" 2>/dev/null | head -1)
+PROBES_ARG=""
+if [[ -n "$PROBES_BED" ]] && [[ -f "$PROBES_BED" ]]; then
+    PROBES_ARG="--probes_bed ${PROBES_BED}"
+    log_info "Probes BED     : ${PROBES_BED}"
+else
+    log_warn "Probes BED not found. Probe coverage QC will be skipped."
+fi
+
+# 4. Zero-probe BED — flagging uncovered target regions
+ZERO_PROBE_BED=$(find "${BED_DIR}" -name "Target_regions_with_zero_probes*.bed" 2>/dev/null | head -1)
+ZERO_PROBE_ARG=""
+if [[ -n "$ZERO_PROBE_BED" ]] && [[ -f "$ZERO_PROBE_BED" ]]; then
+    ZERO_PROBE_ARG="--zero_probe_bed ${ZERO_PROBE_BED}"
+    log_info "Zero-probe BED : ${ZERO_PROBE_BED}"
+    ZP_COUNT=$(grep -c -v "^#\|^track\|^browser" "${ZERO_PROBE_BED}" 2>/dev/null || echo "0")
+    log_info "  → ${ZP_COUNT} zero-probe regions will be flagged in QC/variant reports"
+else
+    log_warn "Zero-probe BED not found. Zero-probe region flagging will be skipped."
+fi
+
+# 5. Gene list — for gene coverage validation
+GENE_LIST=$(find "${BED_DIR}" -name "gene_list*" -o -name "singleGene*" 2>/dev/null | head -1)
+if [[ -z "$GENE_LIST" ]]; then
+    GENE_LIST=$(find "${DATA_DIR}" -name "gene_list*" -o -name "singleGene*" 2>/dev/null | head -1)
+fi
+GENE_LIST_ARG=""
+if [[ -n "$GENE_LIST" ]] && [[ -f "$GENE_LIST" ]]; then
+    GENE_LIST_ARG="--gene_list ${GENE_LIST}"
+    log_info "Gene list      : ${GENE_LIST}"
+else
+    log_warn "Gene list not found. Gene coverage validation will be skipped."
+fi
+
+update_progress "INIT" "BED files detected successfully"
 
 # ── Generate samplesheet ────────────────────────────────────────────────────
 SAMPLESHEET="${ANALYSIS_DIR}/${ORDER_ID}_samplesheet.csv"
@@ -231,6 +295,10 @@ NF_CMD="nextflow run main.nf \
     ${NF_PARAMS_FILE} \
     --input ${SAMPLESHEET} \
     --target_bed ${TARGET_BED} \
+    ${FF_SNPS_ARG} \
+    ${PROBES_ARG} \
+    ${ZERO_PROBE_ARG} \
+    ${GENE_LIST_ARG} \
     --reference_fasta ${REF_FASTA} \
     --bwa_index_dir ${BWA_INDEX_DIR} \
     --outdir ${ORDER_OUTPUT_DIR} \
@@ -308,8 +376,10 @@ if [[ $NF_EXIT_CODE -eq 0 ]]; then
         echo "{
     \"order_id\": \"${ORDER_ID}\",
     \"status\": \"COMPLETED\",
+    \"service_code\": \"sgNIPT\",
     \"pipeline\": \"single_gene_nipt\",
     \"pipeline_version\": \"${PIPELINE_VERSION}\",
+    \"panel\": \"Twist_UCL_SingleGeneNIPT_TE-96276661_hg38\",
     \"timestamp\": \"$(date -Iseconds)\",
     \"output_dir\": \"${ORDER_OUTPUT_DIR}\",
     \"samples\": \"${SAMPLE_NAMES}\",
@@ -332,8 +402,10 @@ else
     echo "{
     \"order_id\": \"${ORDER_ID}\",
     \"status\": \"FAILED\",
+    \"service_code\": \"sgNIPT\",
     \"pipeline\": \"single_gene_nipt\",
     \"pipeline_version\": \"${PIPELINE_VERSION}\",
+    \"panel\": \"Twist_UCL_SingleGeneNIPT_TE-96276661_hg38\",
     \"timestamp\": \"$(date -Iseconds)\",
     \"output_dir\": \"${ORDER_OUTPUT_DIR}\",
     \"samples\": \"${SAMPLE_NAMES}\",

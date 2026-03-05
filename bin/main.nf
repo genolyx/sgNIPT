@@ -2,17 +2,22 @@
 
 /*
  * ============================================================================
- *  Single Gene NIPT Pipeline
+ *  Single Gene NIPT Pipeline v1.1.0
  * ============================================================================
  *  Non-Invasive Prenatal Testing pipeline for single gene disorder screening
  *  using cell-free DNA (cfDNA) from maternal plasma.
+ *
+ *  Twist Custom Panel: UCL_SingleGeneNIPT_TE-96276661_hg38
+ *    - 5,138 target regions (~1.07 Mb), 183 genes, 22 chromosomes
+ *    - No Y-chromosome targets → ChrX-based supplementary FF
+ *    - 29 zero-probe regions flagged in QC
  *
  *  Pipeline flow:
  *    FASTQ → Preprocessing → Alignment → BAM QC → Fetal Fraction Estimation
  *    → Variant Calling → Variant Analysis → Report Generation
  *
  *  Author  : Single Gene NIPT Team
- *  Version : 1.0.0
+ *  Version : 1.1.0
  * ============================================================================
  */
 
@@ -23,10 +28,15 @@ log.info """
 ╔══════════════════════════════════════════════════════════════════╗
 ║           Single Gene NIPT Pipeline v${params.pipeline_version}                  ║
 ║  Non-Invasive Prenatal Testing for Single Gene Disorders        ║
+║  Panel: Twist UCL_SingleGeneNIPT_TE-96276661 (hg38)            ║
 ╚══════════════════════════════════════════════════════════════════╝
 
   Input samplesheet : ${params.input}
   Target BED        : ${params.target_bed}
+  Probes BED        : ${params.probes_bed ?: 'not provided'}
+  FF SNPs BED       : ${params.ff_snps_bed ?: 'using target_bed'}
+  Zero-probe BED    : ${params.zero_probe_bed ?: 'not provided'}
+  Gene list         : ${params.gene_list ?: 'not provided'}
   Reference         : ${params.reference_fasta}
   Output directory  : ${params.outdir}
   Variant caller    : ${params.variant_caller}
@@ -37,10 +47,11 @@ log.info """
 // ── Include modules ─────────────────────────────────────────────────────────
 include { FASTP; FASTQ_QC }                                            from './modules/preprocessing'
 include { BWA_MEM2_ALIGN; MARK_DUPLICATES; EXTRACT_TARGET_READS }      from './modules/alignment'
-include { SAMTOOLS_FLAGSTAT; SAMTOOLS_STATS; SAMTOOLS_IDXSTATS;
-          MOSDEPTH; BAM_QC_EVALUATE; MULTIQC }                         from './modules/bam_qc'
-include { COLLECT_FRAGMENT_SIZES; MPILEUP_AT_SNPS;
-          VARIANT_CALL_FOR_FF; ESTIMATE_FETAL_FRACTION }               from './modules/fetal_fraction'
+include { SAMTOOLS_FLAGSTAT; SAMTOOLS_STATS;
+          MOSDEPTH; ON_TARGET_COUNT; BAM_QC_EVALUATE; MULTIQC }        from './modules/bam_qc'
+include { COLLECT_FRAGMENT_SIZES; SAMTOOLS_IDXSTATS;
+          MPILEUP_AT_SNPS; VARIANT_CALL_FOR_FF;
+          ESTIMATE_FETAL_FRACTION }                                     from './modules/fetal_fraction'
 include { VARIANT_CALL_TARGET; FILTER_VARIANTS;
           ANNOTATE_VARIANTS; VARIANT_ANALYSIS }                        from './modules/variant_calling'
 include { GENERATE_REPORT }                                            from './modules/reporting'
@@ -65,6 +76,13 @@ def parse_samplesheet(samplesheet_path) {
         }
 }
 
+// ── Helper: Join bam + bai into tuple(sample_id, bam, bai) ─────────────────
+def join_bam_bai(ch_bam, ch_bai) {
+    ch_bam
+        .join(ch_bai, by: 0)
+        .map { sample_id, bam, bai -> tuple(sample_id, bam, bai) }
+}
+
 
 // ── Main workflow ───────────────────────────────────────────────────────────
 workflow {
@@ -75,6 +93,16 @@ workflow {
     ch_ref_fasta   = Channel.fromPath(params.reference_fasta)
     ch_ref_fai     = Channel.fromPath("${params.reference_fasta}.fai")
     ch_bwa_index   = Channel.fromPath("${params.bwa_index_dir}/*").collect()
+
+    // FF SNPs BED: use dedicated ff_snps_bed if provided, otherwise fall back to target_bed
+    ch_ff_snps_bed = params.ff_snps_bed
+        ? Channel.fromPath(params.ff_snps_bed)
+        : Channel.fromPath(params.target_bed)
+
+    // Optional BED / gene list channels (provide dummy file name when absent)
+    ch_probes_bed     = params.probes_bed     ? Channel.fromPath(params.probes_bed)     : Channel.of(file('NO_PROBES_BED'))
+    ch_zero_probe_bed = params.zero_probe_bed ? Channel.fromPath(params.zero_probe_bed) : Channel.of(file('NO_ZERO_PROBE_BED'))
+    ch_gene_list      = params.gene_list      ? Channel.fromPath(params.gene_list)      : Channel.of(file('NO_GENE_LIST'))
 
     // ══════════════════════════════════════════════════════════════════════
     // STEP 1: FASTQ Preprocessing
@@ -99,6 +127,12 @@ workflow {
         BWA_MEM2_ALIGN.out.sorted_bai,
     )
 
+    // Create combined bam+bai channel for downstream processes
+    ch_dedup = join_bam_bai(
+        MARK_DUPLICATES.out.dedup_bam,
+        MARK_DUPLICATES.out.dedup_bai,
+    )
+
     // ══════════════════════════════════════════════════════════════════════
     // STEP 4: Extract Target Region Reads
     // ══════════════════════════════════════════════════════════════════════
@@ -108,27 +142,25 @@ workflow {
         ch_target_bed.first(),
     )
 
+    ch_target = join_bam_bai(
+        EXTRACT_TARGET_READS.out.target_bam,
+        EXTRACT_TARGET_READS.out.target_bai,
+    )
+
     // ══════════════════════════════════════════════════════════════════════
     // STEP 5: BAM Quality Control
     // ══════════════════════════════════════════════════════════════════════
-    SAMTOOLS_FLAGSTAT(
-        MARK_DUPLICATES.out.dedup_bam,
-        MARK_DUPLICATES.out.dedup_bai,
-    )
+    SAMTOOLS_FLAGSTAT(ch_dedup)
 
-    SAMTOOLS_STATS(
-        MARK_DUPLICATES.out.dedup_bam,
-        MARK_DUPLICATES.out.dedup_bai,
-    )
-
-    SAMTOOLS_IDXSTATS(
-        MARK_DUPLICATES.out.dedup_bam,
-        MARK_DUPLICATES.out.dedup_bai,
-    )
+    SAMTOOLS_STATS(ch_dedup)
 
     MOSDEPTH(
-        MARK_DUPLICATES.out.dedup_bam,
-        MARK_DUPLICATES.out.dedup_bai,
+        ch_dedup,
+        ch_target_bed.first(),
+    )
+
+    ON_TARGET_COUNT(
+        ch_dedup,
         ch_target_bed.first(),
     )
 
@@ -137,31 +169,35 @@ workflow {
         SAMTOOLS_STATS.out.stats,
         MOSDEPTH.out.summary,
         MOSDEPTH.out.regions,
-        EXTRACT_TARGET_READS.out.on_target_count,
+        ON_TARGET_COUNT.out.on_target_count,
+        ch_probes_bed.first(),
+        ch_zero_probe_bed.first(),
     )
 
     // ══════════════════════════════════════════════════════════════════════
     // STEP 6: Fetal Fraction Estimation
     // ══════════════════════════════════════════════════════════════════════
 
-    // 6a. Collect fragment size distribution (for supplementary FF estimation)
-    COLLECT_FRAGMENT_SIZES(
-        MARK_DUPLICATES.out.dedup_bam,
-        MARK_DUPLICATES.out.dedup_bai,
-    )
+    // 6a. Collect fragment size distribution + chromosome read counts
+    //     (ChrX-based FF supplementary since no Y-chr targets in panel)
+    COLLECT_FRAGMENT_SIZES(ch_dedup)
 
-    // 6b. Variant calling at target SNP sites for FF estimation
+    // 6b. samtools idxstats for ChrX-based FF estimation
+    SAMTOOLS_IDXSTATS(ch_dedup)
+
+    // 6c. Variant calling at FF SNP sites
+    //     Uses ff_snps_bed (dedicated common SNP list) for better FF estimation
     VARIANT_CALL_FOR_FF(
-        MARK_DUPLICATES.out.dedup_bam,
-        MARK_DUPLICATES.out.dedup_bai,
-        ch_target_bed.first(),
+        ch_dedup,
+        ch_ff_snps_bed.first(),
         ch_ref_fasta.first(),
         ch_ref_fai.first(),
     )
 
-    // 6c. Estimate fetal fraction
+    // 6d. Estimate fetal fraction (SNP-based primary + ChrX/fragment supplementary)
     ESTIMATE_FETAL_FRACTION(
         VARIANT_CALL_FOR_FF.out.ff_vcf,
+        SAMTOOLS_IDXSTATS.out.idxstats,
         COLLECT_FRAGMENT_SIZES.out.fragment_stats,
         COLLECT_FRAGMENT_SIZES.out.fragment_sizes,
     )
@@ -170,8 +206,7 @@ workflow {
     // STEP 7: Variant Calling at Target Loci
     // ══════════════════════════════════════════════════════════════════════
     VARIANT_CALL_TARGET(
-        EXTRACT_TARGET_READS.out.target_bam,
-        EXTRACT_TARGET_READS.out.target_bai,
+        ch_target,
         ch_target_bed.first(),
         ch_ref_fasta.first(),
         ch_ref_fai.first(),
@@ -197,6 +232,8 @@ workflow {
         ch_analysis_vcf,
         ESTIMATE_FETAL_FRACTION.out.ff_json,
         ch_target_bed.first(),
+        ch_zero_probe_bed.first(),
+        ch_gene_list.first(),
     )
 
     // ══════════════════════════════════════════════════════════════════════

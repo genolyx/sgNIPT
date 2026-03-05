@@ -7,9 +7,17 @@ Uses informative SNPs where the mother is homozygous and the fetus carries
 a different allele (detectable as minor allele in cfDNA).
 
 Methods implemented:
-1. Informative SNP method (primary): FF = 2 * mean(minor_AF) at informative loci
-2. Y-chromosome method (supplementary, male fetus only)
+1. Informative SNP method (primary): FF = 2 * median(minor_AF) at informative loci
+2. ChrX-based method (supplementary, male fetus only)
+   - Used instead of Y-chr method because the Twist panel (TE-96276661)
+     has NO Y-chromosome targets but includes 18 genes on ChrX (~97 kb)
+   - For male fetus: ChrX reads are ~50% maternal → FF can be estimated
 3. Fragment size distribution method (supplementary)
+
+Panel-specific notes (Twist UCL_SingleGeneNIPT_TE-96276661_hg38):
+  - 5,138 target regions, ~1.07 Mb across 22 chromosomes (no chrY)
+  - ~780 kb covered by probes → expected ~150-230 informative SNPs
+  - ChrX targets: 18 genes, ~97 kb → supplementary FF for male fetus
 """
 
 import argparse
@@ -54,6 +62,8 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "min_base_quality": 20,
     # Minimum mapping quality for read counting
     "min_mapping_quality": 30,
+    # ChrX-based FF: minimum reads on chrX targets to attempt estimation
+    "chrx_min_reads": 100,
 }
 
 
@@ -313,15 +323,16 @@ def identify_informative_snps(
     - The mother is likely homozygous for the reference allele
     - The fetus carries a paternal allele (visible as minor allele in cfDNA)
     - Minor AF is in the expected range for fetal contribution
+
+    For a heterozygous fetal allele in cfDNA: expected AF ~ FF/2
+    Typical FF range: 2-30%, so expected minor AF: 1-15%
     """
     informative = []
 
     for snp in snps:
         maf = snp["minor_af"]
 
-        # Filter: minor AF should be in the range expected for fetal alleles
-        # For a heterozygous fetal allele in cfDNA: expected AF ≈ FF/2
-        # Typical FF range: 2-30%, so expected minor AF: 1-15%
+        # Filter: minor AF should be in the range expected for fetal allele
         if maf < config["min_minor_af"]:
             continue
         if maf > config["max_minor_af"]:
@@ -506,6 +517,155 @@ def bootstrap_confidence_interval(
     return (medians[lower_idx], medians[upper_idx])
 
 
+# ---------------------------------------------------------------------------
+# ChrX-based Fetal Fraction (replaces Y-chr method for this panel)
+# ---------------------------------------------------------------------------
+def parse_idxstats(idxstats_path: str) -> Dict[str, Dict[str, int]]:
+    """
+    Parse samtools idxstats output to extract per-chromosome read counts.
+
+    Returns dict: { chrom_name: {"length": int, "mapped": int, "unmapped": int} }
+    """
+    chrom_stats = {}
+    with open(idxstats_path, "r") as fh:
+        for line in fh:
+            parts = line.strip().split("\t")
+            if len(parts) < 4:
+                continue
+            chrom = parts[0]
+            length = int(parts[1])
+            mapped = int(parts[2])
+            unmapped = int(parts[3])
+            chrom_stats[chrom] = {
+                "length": length,
+                "mapped": mapped,
+                "unmapped": unmapped,
+            }
+    return chrom_stats
+
+
+def estimate_ff_chrx(
+    idxstats_path: str,
+    config: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Estimate fetal fraction using ChrX read proportion.
+
+    Rationale (for this panel with no Y-chr targets):
+    - In a female fetus (XX): both maternal and fetal cfDNA contribute ChrX reads
+      → ChrX/autosome ratio is at the "female baseline"
+    - In a male fetus (XY): fetal cfDNA contributes NO ChrX reads
+      → ChrX/autosome ratio decreases proportionally to FF
+      → FF ≈ 2 * (1 - observed_ratio / female_baseline_ratio)
+
+    This is supplementary to the SNP-based primary method.
+    The female baseline ratio needs to be calibrated from a reference cohort.
+    """
+    logger.info("Estimating FF from ChrX read proportion: %s", idxstats_path)
+
+    chrom_stats = parse_idxstats(idxstats_path)
+
+    # Collect autosome reads (chr1-chr22)
+    autosome_reads = 0
+    autosome_length = 0
+    for i in range(1, 23):
+        for prefix in [f"chr{i}", str(i)]:
+            if prefix in chrom_stats:
+                autosome_reads += chrom_stats[prefix]["mapped"]
+                autosome_length += chrom_stats[prefix]["length"]
+                break
+
+    # Collect ChrX reads
+    chrx_reads = 0
+    chrx_length = 0
+    for name in ["chrX", "X"]:
+        if name in chrom_stats:
+            chrx_reads = chrom_stats[name]["mapped"]
+            chrx_length = chrom_stats[name]["length"]
+            break
+
+    # Collect ChrY reads (for sex determination even though no Y targets in panel)
+    chry_reads = 0
+    for name in ["chrY", "Y"]:
+        if name in chrom_stats:
+            chry_reads = chrom_stats[name]["mapped"]
+            break
+
+    total_mapped = sum(s["mapped"] for s in chrom_stats.values())
+
+    if autosome_reads == 0:
+        return {
+            "method": "chrx_ratio",
+            "fetal_fraction": None,
+            "status": "NO_DATA",
+            "message": "No autosome reads found.",
+        }
+
+    # Normalized ChrX ratio
+    if chrx_length > 0 and autosome_length > 0:
+        chrx_density = chrx_reads / chrx_length
+        auto_density = autosome_reads / autosome_length
+        chrx_ratio = chrx_density / auto_density if auto_density > 0 else 0.0
+    else:
+        chrx_ratio = chrx_reads / autosome_reads if autosome_reads > 0 else 0.0
+
+    # Sex prediction based on ChrX ratio and ChrY reads
+    # In targeted sequencing, ChrY reads should be near-zero for female fetus
+    # (since no Y-chr targets in this panel)
+    if chry_reads > autosome_reads * 0.0001:
+        # Some Y reads detected → likely male fetus (off-target reads)
+        predicted_sex = "male"
+    else:
+        predicted_sex = "undetermined"
+
+    # For ChrX-based FF estimation, we need a female baseline ratio
+    # This should be calibrated from reference samples.
+    # Default female baseline: ~1.0 (normalized density ratio)
+    female_baseline_ratio = config.get("chrx_female_baseline_ratio", 1.0)
+
+    if chrx_ratio < female_baseline_ratio and predicted_sex == "male":
+        # Male fetus: ChrX ratio is reduced
+        ff_estimate = 2.0 * (1.0 - chrx_ratio / female_baseline_ratio)
+        ff_estimate = max(0.0, min(1.0, ff_estimate))
+        status = "SUPPLEMENTARY"
+        message = (
+            "ChrX-based FF estimation (male fetus). "
+            "Requires calibration with reference cohort for accuracy."
+        )
+    else:
+        ff_estimate = None
+        status = "NOT_APPLICABLE"
+        message = (
+            "ChrX-based FF estimation not applicable "
+            "(likely female fetus or uncalibrated baseline)."
+        )
+
+    result = {
+        "method": "chrx_ratio",
+        "fetal_fraction": round(ff_estimate, 4) if ff_estimate is not None else None,
+        "chrx_reads": chrx_reads,
+        "autosome_reads": autosome_reads,
+        "chry_reads": chry_reads,
+        "chrx_normalized_ratio": round(chrx_ratio, 6),
+        "female_baseline_ratio": female_baseline_ratio,
+        "predicted_fetal_sex": predicted_sex,
+        "total_mapped_reads": total_mapped,
+        "status": status,
+        "message": message,
+    }
+
+    logger.info(
+        "ChrX ratio: %.6f, ChrY reads: %d, Predicted sex: %s",
+        chrx_ratio,
+        chry_reads,
+        predicted_sex,
+    )
+    if ff_estimate is not None:
+        logger.info("ChrX-based FF estimate: %.4f", ff_estimate)
+
+    return result
+
+
 def estimate_ff_y_chromosome(
     y_reads: int,
     autosome_reads: int,
@@ -516,14 +676,19 @@ def estimate_ff_y_chromosome(
     Estimate fetal fraction using Y-chromosome read proportion.
     Only applicable for male fetuses.
 
-    FF ≈ 2 * (Y_reads / autosome_reads) * (autosome_length / Y_length)
+    NOTE: The Twist UCL_SingleGeneNIPT panel has NO Y-chromosome targets.
+    This method will only capture off-target Y reads, which are unreliable
+    for targeted sequencing. Use ChrX-based method instead.
+
+    FF ~ 2 * (Y_reads / autosome_reads) * (autosome_length / Y_length)
     """
     if autosome_reads == 0 or y_reads == 0:
         return {
             "method": "y_chromosome",
             "fetal_fraction": None,
             "status": "NOT_APPLICABLE",
-            "message": "No Y-chromosome reads detected (likely female fetus).",
+            "message": "No Y-chromosome reads detected. "
+                       "Note: This panel has no Y-chr targets; use ChrX method instead.",
         }
 
     # Normalize by chromosome length
@@ -535,7 +700,7 @@ def estimate_ff_y_chromosome(
 
     if ff > 0.01:
         predicted_sex = "male"
-        status = "PASS"
+        status = "SUPPLEMENTARY"
     else:
         predicted_sex = "female"
         status = "LIKELY_FEMALE"
@@ -547,6 +712,8 @@ def estimate_ff_y_chromosome(
         "autosome_reads": autosome_reads,
         "predicted_fetal_sex": predicted_sex,
         "status": status,
+        "message": "Y-chr method unreliable for this panel (no Y targets). "
+                   "Use SNP-based or ChrX-based method as primary.",
     }
 
 
@@ -559,7 +726,7 @@ def estimate_ff_fragment_size(
     Estimate fetal fraction using cfDNA fragment size distribution.
     Fetal cfDNA fragments are typically shorter (~143bp) than maternal (~166bp).
 
-    FF ≈ proportion of short fragments (< threshold)
+    FF ~ proportion of short fragments (< threshold)
     This is a rough estimate and should be used as supplementary evidence.
     """
     logger.info("Estimating FF from fragment size distribution: %s", fragment_sizes_file)
@@ -600,7 +767,7 @@ def estimate_ff_fragment_size(
     mean_size = sum(sizes) / total
     median_size = sorted(sizes)[total // 2]
 
-    # Empirical relationship: FF ≈ f(short_ratio)
+    # Empirical relationship: FF ~ f(short_ratio)
     # This is a simplified model; real implementations use trained models
     ff_estimate = short_ratio * 0.5  # Rough approximation
 
@@ -637,21 +804,31 @@ def main():
         help="TSV file with target SNP positions (chrom, pos, ref, alt). Used with --pileup.",
     )
     parser.add_argument(
+        "--idxstats",
+        default=None,
+        help="samtools idxstats output file for ChrX/ChrY-based FF estimation.",
+    )
+    parser.add_argument(
         "--y-reads",
         type=int,
         default=None,
-        help="Number of reads mapped to Y chromosome.",
+        help="Number of reads mapped to Y chromosome (deprecated; use --idxstats).",
     )
     parser.add_argument(
         "--autosome-reads",
         type=int,
         default=None,
-        help="Number of reads mapped to autosomes.",
+        help="Number of reads mapped to autosomes (deprecated; use --idxstats).",
     )
     parser.add_argument(
         "--fragment-sizes",
         default=None,
         help="File with fragment size distribution (size\\tcount per line).",
+    )
+    parser.add_argument(
+        "--fragment-stats",
+        default=None,
+        help="Fragment statistics JSON file from collect_fragment_sizes.py.",
     )
     parser.add_argument(
         "--config",
@@ -669,13 +846,14 @@ def main():
 
     results = {
         "sample_id": args.sample_id,
+        "panel": "Twist_UCL_SingleGeneNIPT_TE-96276661_hg38",
         "methods": {},
         "primary_fetal_fraction": None,
         "primary_method": None,
         "status": None,
     }
 
-    # Method 1: SNP-based (primary)
+    # ── Method 1: SNP-based (primary) ────────────────────────────────────
     snps = []
     if args.vcf:
         snps = parse_vcf_for_snps(args.vcf, config)
@@ -693,23 +871,52 @@ def main():
             results["primary_method"] = "snp_informative"
             results["status"] = snp_result["status"]
 
-    # Method 2: Y-chromosome (supplementary)
-    if args.y_reads is not None and args.autosome_reads is not None:
+    # ── Method 2: ChrX-based (supplementary, replaces Y-chr for this panel) ──
+    if args.idxstats:
+        chrx_result = estimate_ff_chrx(args.idxstats, config)
+        results["methods"]["chrx_ratio"] = chrx_result
+
+        # Also extract Y-chr reads from idxstats for legacy Y-chr method
+        chrom_stats = parse_idxstats(args.idxstats)
+        y_reads = 0
+        autosome_reads = 0
+        for name in ["chrY", "Y"]:
+            if name in chrom_stats:
+                y_reads = chrom_stats[name]["mapped"]
+                break
+        for i in range(1, 23):
+            for prefix in [f"chr{i}", str(i)]:
+                if prefix in chrom_stats:
+                    autosome_reads += chrom_stats[prefix]["mapped"]
+                    break
+
+        y_result = estimate_ff_y_chromosome(y_reads, autosome_reads)
+        results["methods"]["y_chromosome"] = y_result
+
+        # Use ChrX as fallback if SNP method failed
+        if (results["primary_fetal_fraction"] is None
+                and chrx_result["fetal_fraction"] is not None):
+            results["primary_fetal_fraction"] = chrx_result["fetal_fraction"]
+            results["primary_method"] = "chrx_ratio"
+            results["status"] = chrx_result["status"]
+
+    elif args.y_reads is not None and args.autosome_reads is not None:
+        # Legacy: direct y_reads / autosome_reads arguments
         y_result = estimate_ff_y_chromosome(args.y_reads, args.autosome_reads)
         results["methods"]["y_chromosome"] = y_result
 
-        # Use as primary if SNP method failed
-        if results["primary_fetal_fraction"] is None and y_result["fetal_fraction"] is not None:
+        if (results["primary_fetal_fraction"] is None
+                and y_result["fetal_fraction"] is not None):
             results["primary_fetal_fraction"] = y_result["fetal_fraction"]
             results["primary_method"] = "y_chromosome"
             results["status"] = y_result["status"]
 
-    # Method 3: Fragment size (supplementary)
+    # ── Method 3: Fragment size (supplementary) ──────────────────────────
     if args.fragment_sizes:
         frag_result = estimate_ff_fragment_size(args.fragment_sizes)
         results["methods"]["fragment_size"] = frag_result
 
-    # Final status
+    # ── Final status ─────────────────────────────────────────────────────
     if results["primary_fetal_fraction"] is None:
         results["status"] = "FAILED"
         logger.error("Failed to estimate fetal fraction for sample %s", args.sample_id)
@@ -721,14 +928,35 @@ def main():
             results["primary_method"],
         )
 
-    # Write output
+    # ── Cross-validation between methods ─────────────────────────────────
+    method_ffs = {}
+    for method_name, method_data in results["methods"].items():
+        ff = method_data.get("fetal_fraction")
+        if ff is not None:
+            method_ffs[method_name] = ff
+
+    if len(method_ffs) >= 2:
+        ff_values = list(method_ffs.values())
+        ff_range = max(ff_values) - min(ff_values)
+        results["cross_validation"] = {
+            "methods_with_ff": method_ffs,
+            "ff_range": round(ff_range, 4),
+            "concordant": ff_range < 0.10,  # Within 10% absolute difference
+        }
+        if not results["cross_validation"]["concordant"]:
+            logger.warning(
+                "FF estimates are discordant across methods (range=%.4f): %s",
+                ff_range,
+                method_ffs,
+            )
+
+    # ── Write output ─────────────────────────────────────────────────────
     # Remove per-SNP estimates from output to keep file size manageable
     output_results = json.loads(json.dumps(results))
     if "snp_informative" in output_results.get("methods", {}):
         snp_data = output_results["methods"]["snp_informative"]
         if "per_snp_estimates" in snp_data:
             snp_data["per_snp_estimates_count"] = len(snp_data["per_snp_estimates"])
-            # Keep only summary stats, not all individual estimates
             del snp_data["per_snp_estimates"]
 
     output_path = Path(args.output)

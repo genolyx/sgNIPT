@@ -7,10 +7,15 @@ Classifies variants as maternal, fetal-specific, or shared based on
 allele frequencies and fetal fraction estimates.
 
 Key concepts:
-- Maternal homozygous (AA): expected AF ≈ 0% (ref) or ≈ 100% (alt)
-- Maternal heterozygous (AB): expected AF ≈ 50%
-- Fetal-specific (paternal) allele: expected AF ≈ FF/2
-- Fetal heterozygous from maternal carrier: expected AF ≈ 50% + FF/2 or 50% - FF/2
+- Maternal homozygous (AA): expected AF ~ 0% (ref) or ~ 100% (alt)
+- Maternal heterozygous (AB): expected AF ~ 50%
+- Fetal-specific (paternal) allele: expected AF ~ FF/2
+- Fetal heterozygous from maternal carrier: expected AF ~ 50% + FF/2 or 50% - FF/2
+
+Panel-specific features (Twist UCL_SingleGeneNIPT_TE-96276661_hg38):
+  - Zero-probe region flagging: variants in 29 zero-probe regions are flagged
+  - Gene list validation: cross-checks detected genes against singleGene_NIPT.xlsx
+  - 182 target genes across 5,138 regions
 """
 
 import argparse
@@ -20,7 +25,7 @@ import logging
 import math
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 logging.basicConfig(
     level=logging.INFO,
@@ -38,15 +43,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "min_depth": 100,
     # Minimum variant allele frequency to call a variant present
     "min_vaf": 0.005,
-    # Maternal homozygous threshold: AF > this → likely maternal hom alt
+    # Maternal homozygous threshold: AF > this -> likely maternal hom alt
     "maternal_hom_alt_threshold": 0.85,
-    # Maternal homozygous ref threshold: AF < this → likely maternal hom ref
+    # Maternal homozygous ref threshold: AF < this -> likely maternal hom ref
     "maternal_hom_ref_threshold": 0.15,
     # Maternal heterozygous range
     "maternal_het_lower": 0.35,
     "maternal_het_upper": 0.65,
     # Fetal-specific allele detection: AF should be around FF/2
-    # We use a window of FF/2 ± tolerance
+    # We use a window of FF/2 +/- tolerance
     "fetal_af_tolerance_factor": 2.0,  # multiplier for expected FF/2
     # Minimum base quality
     "min_base_quality": 20,
@@ -68,6 +73,170 @@ def load_config(config_file: Optional[str]) -> Dict[str, Any]:
     return config
 
 
+# ---------------------------------------------------------------------------
+# Gene list loading and validation
+# ---------------------------------------------------------------------------
+def load_gene_list(gene_list_path: str) -> Dict[str, Dict[str, Any]]:
+    """
+    Load the target gene list (singleGene_NIPT.xlsx exported as TSV/CSV,
+    or a simple text file with one gene per line).
+
+    Returns dict: { gene_symbol: { "disease": ..., "inheritance": ..., ... } }
+    """
+    logger.info("Loading gene list: %s", gene_list_path)
+    genes = {}
+
+    path = Path(gene_list_path)
+    suffix = path.suffix.lower()
+
+    if suffix in (".tsv", ".csv", ".txt"):
+        delimiter = "\t" if suffix == ".tsv" else ","
+        with open(gene_list_path, "r") as fh:
+            # Try to detect if there's a header
+            first_line = fh.readline().strip()
+            fh.seek(0)
+
+            if any(kw in first_line.lower() for kw in ["gene", "symbol", "name", "disease"]):
+                reader = csv.DictReader(fh, delimiter=delimiter)
+                for row in reader:
+                    gene = (
+                        row.get("Gene", "")
+                        or row.get("gene", "")
+                        or row.get("Gene Symbol", "")
+                        or row.get("symbol", "")
+                    ).strip()
+                    if gene:
+                        genes[gene] = {
+                            "disease": row.get("Disease", row.get("disease", "")),
+                            "inheritance": row.get("Inheritance", row.get("inheritance", "")),
+                            "omim": row.get("OMIM", row.get("omim", "")),
+                        }
+            else:
+                # Simple one-gene-per-line format
+                for line in fh:
+                    gene = line.strip()
+                    if gene and not gene.startswith("#"):
+                        genes[gene] = {}
+    elif suffix in (".json",):
+        with open(gene_list_path, "r") as fh:
+            data = json.load(fh)
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, str):
+                    genes[item] = {}
+                elif isinstance(item, dict):
+                    gene = item.get("gene", item.get("Gene", ""))
+                    if gene:
+                        genes[gene] = item
+        elif isinstance(data, dict):
+            genes = data
+
+    logger.info("Loaded %d genes from gene list", len(genes))
+    return genes
+
+
+def validate_gene_coverage(
+    targets: List[Dict[str, Any]],
+    gene_list: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Validate that all genes in the gene list are covered by target regions.
+    Returns coverage report.
+    """
+    logger.info("Validating gene coverage against gene list...")
+
+    # Extract genes from target BED
+    target_genes = set()
+    gene_to_regions = {}
+    for t in targets:
+        gene = t.get("gene", "")
+        name = t.get("name", "")
+        # Try to extract gene from name field if gene field is empty
+        if not gene and name:
+            # Common BED name formats: "GENE_exon1", "GENE:NM_xxx", etc.
+            gene = name.split("_")[0].split(":")[0].split("|")[0]
+        if gene:
+            target_genes.add(gene)
+            if gene not in gene_to_regions:
+                gene_to_regions[gene] = []
+            gene_to_regions[gene].append(t)
+
+    # Check coverage
+    covered = set()
+    missing = set()
+    for gene in gene_list:
+        if gene in target_genes:
+            covered.add(gene)
+        else:
+            missing.add(gene)
+
+    # Extra genes in panel not in gene list
+    extra = target_genes - set(gene_list.keys())
+
+    result = {
+        "total_genes_in_list": len(gene_list),
+        "genes_covered_by_panel": len(covered),
+        "genes_missing_from_panel": len(missing),
+        "extra_genes_in_panel": len(extra),
+        "coverage_rate": round(len(covered) / len(gene_list), 4) if gene_list else 0.0,
+        "missing_genes": sorted(missing),
+        "extra_genes": sorted(extra)[:50],  # cap output
+    }
+
+    if missing:
+        logger.warning(
+            "Gene coverage: %d/%d genes covered. Missing: %s",
+            len(covered),
+            len(gene_list),
+            ", ".join(sorted(missing)[:10]),
+        )
+    else:
+        logger.info("Gene coverage: All %d genes covered by panel", len(gene_list))
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Zero-probe region handling
+# ---------------------------------------------------------------------------
+def load_zero_probe_regions(zero_probe_bed: str) -> List[Dict[str, Any]]:
+    """Load zero-probe regions from BED file."""
+    regions = []
+    with open(zero_probe_bed, "r") as fh:
+        for line in fh:
+            if line.startswith("#") or line.startswith("track"):
+                continue
+            parts = line.strip().split("\t")
+            if len(parts) >= 3:
+                region = {
+                    "chrom": parts[0],
+                    "start": int(parts[1]),
+                    "end": int(parts[2]),
+                }
+                if len(parts) >= 4:
+                    region["name"] = parts[3]
+                regions.append(region)
+    logger.info("Loaded %d zero-probe regions", len(regions))
+    return regions
+
+
+def check_variant_in_zero_probe(
+    variant: Dict[str, Any],
+    zero_probe_regions: List[Dict[str, Any]],
+) -> bool:
+    """Check if a variant falls within a zero-probe region."""
+    chrom = variant["chrom"]
+    pos = variant["pos"]
+    for region in zero_probe_regions:
+        if (region["chrom"] == chrom
+                and region["start"] <= pos <= region["end"]):
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Target BED and VCF parsing
+# ---------------------------------------------------------------------------
 def load_target_bed(bed_path: str) -> List[Dict[str, Any]]:
     """
     Load target BED file with disease/gene annotations.
@@ -209,6 +378,9 @@ def parse_vcf_variants(vcf_path: str, config: Dict[str, Any]) -> List[Dict[str, 
     return variants
 
 
+# ---------------------------------------------------------------------------
+# Variant classification
+# ---------------------------------------------------------------------------
 def classify_variant_origin(
     variant: Dict[str, Any],
     fetal_fraction: float,
@@ -218,11 +390,11 @@ def classify_variant_origin(
     Classify a variant's origin based on allele frequency and fetal fraction.
 
     Classification logic:
-    1. VAF ≈ 50%: Maternal heterozygous (could also be shared with fetus)
-    2. VAF ≈ 100%: Maternal homozygous alt
-    3. VAF ≈ FF/2 (low): Fetal-specific (paternal origin, fetus heterozygous)
-    4. VAF ≈ 50% + FF/2: Maternal carrier + fetal inherited
-    5. VAF ≈ 50% - FF/2: Maternal carrier, fetus did NOT inherit
+    1. VAF ~ 50%: Maternal heterozygous (could also be shared with fetus)
+    2. VAF ~ 100%: Maternal homozygous alt
+    3. VAF ~ FF/2 (low): Fetal-specific (paternal origin, fetus heterozygous)
+    4. VAF ~ 50% + FF/2: Maternal carrier + fetal inherited
+    5. VAF ~ 50% - FF/2: Maternal carrier, fetus did NOT inherit
     """
     vaf = variant["vaf"]
     depth = variant["depth"]
@@ -239,24 +411,22 @@ def classify_variant_origin(
         "details": "",
     }
 
-    # Case 1: Very high VAF → maternal homozygous alt
+    # Case 1: Very high VAF -> maternal homozygous alt
     if vaf >= config["maternal_hom_alt_threshold"]:
         classification["origin"] = "maternal"
         classification["maternal_genotype_prediction"] = "hom_alt"
         classification["confidence"] = "high"
-        # Fetus likely has at least one alt allele
         classification["fetal_genotype_prediction"] = "at_least_het"
         classification["details"] = (
             f"VAF={vaf:.4f} indicates maternal homozygous alt. "
             "Fetus inherits at least one alt allele from mother."
         )
 
-    # Case 2: VAF in heterozygous range → maternal heterozygous
+    # Case 2: VAF in heterozygous range -> maternal heterozygous
     elif config["maternal_het_lower"] <= vaf <= config["maternal_het_upper"]:
         classification["origin"] = "maternal_het"
         classification["maternal_genotype_prediction"] = "het"
 
-        # Check if VAF deviates from 50% in a way consistent with fetal contribution
         deviation = vaf - 0.5
         if abs(deviation) < tolerance:
             classification["confidence"] = "medium"
@@ -270,7 +440,7 @@ def classify_variant_origin(
             classification["fetal_genotype_prediction"] = "likely_het"
             classification["details"] = (
                 f"VAF={vaf:.4f} slightly above 50%, consistent with maternal het + "
-                f"fetal inheritance (expected shift ≈ {expected_fetal_af:.4f})."
+                f"fetal inheritance (expected shift ~ {expected_fetal_af:.4f})."
             )
         elif deviation < 0 and abs(deviation + expected_fetal_af) < tolerance:
             classification["confidence"] = "medium"
@@ -283,10 +453,9 @@ def classify_variant_origin(
             classification["confidence"] = "low"
             classification["fetal_genotype_prediction"] = "uncertain"
 
-    # Case 3: Low VAF around FF/2 → fetal-specific (paternal allele)
-    elif abs(vaf - expected_fetal_af) < tolerance and vaf < config["maternal_het_lower"]:
-        # Perform binomial test to confirm significance
-        p_value = binomial_test(alt_count, depth, 0.001)  # test against noise
+    # Case 3: Low VAF around FF/2 -> fetal-specific (paternal allele)
+    elif abs(vaf - expected_fetal_af) < tolerance and expected_fetal_af > 0:
+        p_value = binomial_test(alt_count, depth, 0.001)
 
         if p_value < config["binomial_pvalue_threshold"]:
             classification["origin"] = "fetal_specific"
@@ -294,7 +463,7 @@ def classify_variant_origin(
             classification["fetal_genotype_prediction"] = "het"
             classification["confidence"] = "high"
             classification["details"] = (
-                f"VAF={vaf:.4f} ≈ FF/2={expected_fetal_af:.4f}. "
+                f"VAF={vaf:.4f} ~ FF/2={expected_fetal_af:.4f}. "
                 f"Binomial p-value={p_value:.2e}. "
                 "Likely fetal-specific variant (paternal origin)."
             )
@@ -307,13 +476,13 @@ def classify_variant_origin(
                 f"not significant (p={p_value:.2e})."
             )
 
-    # Case 4: Very low VAF → possible noise or very low fetal signal
+    # Case 4: Very low VAF -> possible noise or very low fetal signal
     elif vaf < config["min_vaf"] * 2:
         classification["origin"] = "noise"
         classification["confidence"] = "low"
         classification["details"] = f"VAF={vaf:.4f} too low, likely sequencing noise."
 
-    # Case 5: Intermediate VAF (between fetal and maternal het ranges)
+    # Case 5: Intermediate VAF
     else:
         classification["origin"] = "ambiguous"
         classification["confidence"] = "low"
@@ -342,7 +511,6 @@ def binomial_test(successes: int, trials: int, expected_prob: float) -> float:
         return 1.0
 
     z = (observed_prob - expected_prob) / se
-    # Approximate p-value using standard normal CDF
     p_value = 0.5 * math.erfc(z / math.sqrt(2))
     return p_value
 
@@ -390,6 +558,8 @@ def generate_variant_report(
     variants: List[Dict[str, Any]],
     fetal_fraction: float,
     sample_id: str,
+    gene_coverage: Optional[Dict[str, Any]] = None,
+    zero_probe_stats: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Generate a structured variant analysis report."""
     logger.info("Generating variant analysis report...")
@@ -400,6 +570,7 @@ def generate_variant_report(
     fetal_specific = [v for v in variants if v.get("classification", {}).get("origin") == "fetal_specific"]
     maternal_het = [v for v in variants if v.get("classification", {}).get("origin") == "maternal_het"]
     maternal_hom = [v for v in variants if v.get("classification", {}).get("origin") == "maternal"]
+    in_zero_probe = [v for v in variants if v.get("in_zero_probe_region", False)]
 
     # Clinically relevant findings
     clinical_findings = []
@@ -426,7 +597,16 @@ def generate_variant_report(
             "target_name": target.get("name", ""),
             "pathogenic_variant": target.get("pathogenic_variant", ""),
             "details": cls.get("details", ""),
+            "in_zero_probe_region": var.get("in_zero_probe_region", False),
         }
+
+        # Add warning for zero-probe region variants
+        if var.get("in_zero_probe_region", False):
+            finding["warning"] = (
+                "This variant falls in a zero-probe region. "
+                "Detection reliability is reduced."
+            )
+
         clinical_findings.append(finding)
 
     # Sort by confidence (high first) then by chromosome and position
@@ -441,6 +621,7 @@ def generate_variant_report(
 
     report = {
         "sample_id": sample_id,
+        "panel": "Twist_UCL_SingleGeneNIPT_TE-96276661_hg38",
         "fetal_fraction_used": fetal_fraction,
         "summary": {
             "total_variants_analyzed": total_variants,
@@ -448,6 +629,7 @@ def generate_variant_report(
             "fetal_specific_variants": len(fetal_specific),
             "maternal_heterozygous_variants": len(maternal_het),
             "maternal_homozygous_variants": len(maternal_hom),
+            "variants_in_zero_probe_regions": len(in_zero_probe),
             "clinical_findings_count": len(clinical_findings),
         },
         "clinical_findings": clinical_findings,
@@ -463,10 +645,38 @@ def generate_variant_report(
                 "fetal_genotype": v.get("classification", {}).get("fetal_genotype_prediction", "unknown"),
                 "confidence": v.get("classification", {}).get("confidence", "low"),
                 "target_name": v.get("target_info", {}).get("name", "") if v.get("target_info") else "",
+                "in_zero_probe_region": v.get("in_zero_probe_region", False),
             }
             for v in in_target
         ],
     }
+
+    # Add gene coverage validation if available
+    if gene_coverage:
+        report["gene_coverage_validation"] = gene_coverage
+
+    # Add zero-probe region stats
+    if zero_probe_stats:
+        report["zero_probe_region_stats"] = zero_probe_stats
+
+    # Warnings section
+    warnings = []
+    if in_zero_probe:
+        warnings.append({
+            "type": "zero_probe_variants",
+            "message": f"{len(in_zero_probe)} variant(s) detected in zero-probe regions. "
+                       "These may have reduced detection reliability.",
+            "count": len(in_zero_probe),
+        })
+    if gene_coverage and gene_coverage.get("genes_missing_from_panel", 0) > 0:
+        warnings.append({
+            "type": "missing_genes",
+            "message": f"{gene_coverage['genes_missing_from_panel']} gene(s) from the target list "
+                       "are not covered by the panel.",
+            "missing": gene_coverage.get("missing_genes", []),
+        })
+    if warnings:
+        report["warnings"] = warnings
 
     logger.info(
         "Report: %d total variants, %d in target, %d fetal-specific, %d clinical findings",
@@ -491,6 +701,16 @@ def main():
         required=True,
         help="Estimated fetal fraction (0-1).",
     )
+    parser.add_argument(
+        "--gene-list",
+        default=None,
+        help="Gene list file (TSV/CSV/JSON) for coverage validation.",
+    )
+    parser.add_argument(
+        "--zero-probe-bed",
+        default=None,
+        help="BED file with zero-probe regions for variant flagging.",
+    )
     parser.add_argument("--config", default=None, help="JSON configuration file.")
     parser.add_argument("--output", required=True, help="Output JSON report file.")
     args = parser.parse_args()
@@ -506,13 +726,45 @@ def main():
     # Annotate with target regions
     variants = annotate_with_targets(variants, targets)
 
+    # Load and check zero-probe regions
+    zero_probe_regions = []
+    zero_probe_stats = None
+    if args.zero_probe_bed and Path(args.zero_probe_bed).exists():
+        zero_probe_regions = load_zero_probe_regions(args.zero_probe_bed)
+        zero_probe_stats = {
+            "num_regions": len(zero_probe_regions),
+            "total_bp": sum(r["end"] - r["start"] for r in zero_probe_regions),
+        }
+        # Flag variants in zero-probe regions
+        zp_count = 0
+        for var in variants:
+            var["in_zero_probe_region"] = check_variant_in_zero_probe(var, zero_probe_regions)
+            if var["in_zero_probe_region"]:
+                zp_count += 1
+        if zp_count > 0:
+            logger.warning(
+                "%d variants fall within zero-probe regions", zp_count
+            )
+
+    # Gene list validation
+    gene_coverage = None
+    if args.gene_list and Path(args.gene_list).exists():
+        gene_list = load_gene_list(args.gene_list)
+        gene_coverage = validate_gene_coverage(targets, gene_list)
+
     # Classify each variant
     logger.info("Classifying variant origins (FF=%.4f)...", args.fetal_fraction)
     for var in variants:
         var["classification"] = classify_variant_origin(var, args.fetal_fraction, config)
 
     # Generate report
-    report = generate_variant_report(variants, args.fetal_fraction, args.sample_id)
+    report = generate_variant_report(
+        variants,
+        args.fetal_fraction,
+        args.sample_id,
+        gene_coverage=gene_coverage,
+        zero_probe_stats=zero_probe_stats,
+    )
 
     # Write output
     output_path = Path(args.output)
@@ -526,22 +778,32 @@ def main():
     print(f"\n{'='*60}")
     print(f"VARIANT ANALYSIS SUMMARY - {args.sample_id}")
     print(f"{'='*60}")
+    print(f"Panel: Twist UCL_SingleGeneNIPT TE-96276661 (hg38)")
     print(f"Fetal Fraction: {args.fetal_fraction:.4f}")
     print(f"Total variants analyzed: {summary['total_variants_analyzed']}")
     print(f"Variants in target regions: {summary['variants_in_target']}")
     print(f"Fetal-specific variants: {summary['fetal_specific_variants']}")
+    print(f"Variants in zero-probe regions: {summary['variants_in_zero_probe_regions']}")
     print(f"Clinical findings: {summary['clinical_findings_count']}")
+
+    if gene_coverage:
+        print(f"\nGene Coverage: {gene_coverage['genes_covered_by_panel']}/{gene_coverage['total_genes_in_list']} "
+              f"({gene_coverage['coverage_rate']*100:.1f}%)")
+        if gene_coverage["missing_genes"]:
+            print(f"Missing genes: {', '.join(gene_coverage['missing_genes'][:10])}")
+
     print(f"{'='*60}\n")
 
     if report["clinical_findings"]:
         print("CLINICAL FINDINGS:")
         for i, finding in enumerate(report["clinical_findings"], 1):
+            zp_flag = " [ZERO-PROBE]" if finding.get("in_zero_probe_region") else ""
             print(
                 f"  {i}. {finding['chrom']}:{finding['pos']} {finding['ref']}>{finding['alt']} "
                 f"| VAF={finding['vaf']:.4f} | Origin={finding['origin']} "
                 f"| Fetal GT={finding['fetal_genotype']} "
                 f"| Gene={finding['gene']} | Disease={finding['disease']} "
-                f"| Confidence={finding['confidence']}"
+                f"| Confidence={finding['confidence']}{zp_flag}"
             )
         print()
 

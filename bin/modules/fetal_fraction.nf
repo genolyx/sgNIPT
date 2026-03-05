@@ -2,6 +2,11 @@
  * ============================================================================
  *  Module: fetal_fraction.nf
  *  Description: Fetal fraction estimation from cfDNA
+ *
+ *  Panel: Twist UCL_SingleGeneNIPT TE-96276661 (hg38)
+ *  - Uses ff_snps_bed (common SNP positions within target regions) for FF
+ *  - ChrX-based FF as supplementary (no Y-chr targets in panel)
+ *  - Fragment size distribution as additional supplementary method
  * ============================================================================
  */
 
@@ -11,8 +16,7 @@ process COLLECT_FRAGMENT_SIZES {
     publishDir "${params.outdir}/${sample_id}/fetal_fraction", mode: 'copy'
 
     input:
-    tuple val(sample_id), path(bam)
-    tuple val(sample_id), path(bai)
+    tuple val(sample_id), path(bam), path(bai)
 
     output:
     tuple val(sample_id), path("${sample_id}.fragment_sizes.tsv"),  emit: fragment_sizes
@@ -30,31 +34,47 @@ process COLLECT_FRAGMENT_SIZES {
     """
 }
 
+process SAMTOOLS_IDXSTATS {
+    tag "${sample_id}"
+    label 'process_low'
+    publishDir "${params.outdir}/${sample_id}/fetal_fraction", mode: 'copy'
+
+    input:
+    tuple val(sample_id), path(bam), path(bai)
+
+    output:
+    tuple val(sample_id), path("${sample_id}.idxstats.txt"), emit: idxstats
+
+    script:
+    """
+    samtools idxstats ${bam} > ${sample_id}.idxstats.txt
+    """
+}
+
 process MPILEUP_AT_SNPS {
     tag "${sample_id}"
     label 'process_medium'
     publishDir "${params.outdir}/${sample_id}/fetal_fraction", mode: 'copy'
 
     input:
-    tuple val(sample_id), path(bam)
-    tuple val(sample_id), path(bai)
-    path(target_bed)
+    tuple val(sample_id), path(bam), path(bai)
+    path(ff_snps_bed)
     path(reference_fasta)
     path(reference_fai)
 
     output:
-    tuple val(sample_id), path("${sample_id}.target_pileup.txt"), emit: pileup
+    tuple val(sample_id), path("${sample_id}.ff_snps_pileup.txt"), emit: pileup
 
     script:
     """
     samtools mpileup \\
         -f ${reference_fasta} \\
-        -l ${target_bed} \\
+        -l ${ff_snps_bed} \\
         -q ${params.min_mapping_quality} \\
         -Q ${params.min_base_quality} \\
         --max-depth ${params.mpileup_max_depth} \\
         ${bam} \\
-        > ${sample_id}.target_pileup.txt
+        > ${sample_id}.ff_snps_pileup.txt
     """
 }
 
@@ -64,9 +84,8 @@ process VARIANT_CALL_FOR_FF {
     publishDir "${params.outdir}/${sample_id}/fetal_fraction", mode: 'copy'
 
     input:
-    tuple val(sample_id), path(bam)
-    tuple val(sample_id), path(bai)
-    path(target_bed)
+    tuple val(sample_id), path(bam), path(bai)
+    path(ff_snps_bed)
     path(reference_fasta)
     path(reference_fai)
 
@@ -78,7 +97,7 @@ process VARIANT_CALL_FOR_FF {
         """
         freebayes \\
             -f ${reference_fasta} \\
-            -t ${target_bed} \\
+            -t ${ff_snps_bed} \\
             --min-mapping-quality ${params.min_mapping_quality} \\
             --min-base-quality ${params.min_base_quality} \\
             --min-alternate-fraction ${params.ff_min_alt_fraction} \\
@@ -99,7 +118,7 @@ process VARIANT_CALL_FOR_FF {
         # Use bcftools mpileup + call as default
         bcftools mpileup \\
             -f ${reference_fasta} \\
-            -R ${target_bed} \\
+            -R ${ff_snps_bed} \\
             -q ${params.min_mapping_quality} \\
             -Q ${params.min_base_quality} \\
             -d ${params.mpileup_max_depth} \\
@@ -123,6 +142,7 @@ process ESTIMATE_FETAL_FRACTION {
 
     input:
     tuple val(sample_id), path(ff_vcf)
+    tuple val(sample_id), path(idxstats)
     tuple val(sample_id), path(fragment_stats)
     tuple val(sample_id), path(fragment_sizes)
 
@@ -133,17 +153,11 @@ process ESTIMATE_FETAL_FRACTION {
     script:
     def config_arg = params.ff_config ? "--config ${params.ff_config}" : ""
 
-    // Extract Y and autosome reads from fragment stats
     """
-    # Extract chromosome read counts from fragment stats
-    Y_READS=\$(python3 -c "import json; d=json.load(open('${fragment_stats}')); print(d.get('y_chromosome_reads', 0))")
-    AUTO_READS=\$(python3 -c "import json; d=json.load(open('${fragment_stats}')); print(d.get('autosome_reads', 0))")
-
     python3 ${projectDir}/scripts/fetal_fraction.py \\
         --sample-id ${sample_id} \\
         --vcf ${ff_vcf} \\
-        --y-reads \${Y_READS} \\
-        --autosome-reads \${AUTO_READS} \\
+        --idxstats ${idxstats} \\
         --fragment-sizes ${fragment_sizes} \\
         ${config_arg} \\
         --output ${sample_id}.fetal_fraction.json
