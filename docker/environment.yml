@@ -6,7 +6,6 @@ channels:
 dependencies:
   # ── Core tools ─────────────────────────────────────────────────────────
   - python>=3.9
-  - nextflow>=23.04
   
   # ── Preprocessing ──────────────────────────────────────────────────────
   - fastp>=0.23
@@ -31,6 +30,12 @@ dependencies:
   # - snpsift>=5.1
   
   # ── Python dependencies ────────────────────────────────────────────────
+  - numpy
+  - pandas
+  - scipy
+  - pysam
+  - matplotlib
+  - jinja2
   - pip:
-    - numpy
-    - pandas
+    - python-pptx
+    - pypdf
