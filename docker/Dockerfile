@@ -60,6 +60,8 @@ COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 # ── Environment ─────────────────────────────────────────────────────────────
+# Conda bin must be in PATH (we override micromamba's entrypoint, so no auto-activation)
+ENV PATH="/opt/conda/bin:$PATH"
 ENV TZ=Asia/Seoul
 ENV PYTHONUNBUFFERED=1
 ENV NXF_HOME=/tmp/.nextflow

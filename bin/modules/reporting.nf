@@ -17,18 +17,18 @@ process GENERATE_REPORT {
     tuple val(sample_id), path(variant_report_json)
 
     output:
-    tuple val(sample_id), path("${sample_id}.final_report.json"), emit: report_json
-    tuple val(sample_id), path("${sample_id}.final_report.html"), emit: report_html
+    tuple val(sample_id), path("${sample_id}_final_report.json"), emit: report_json
+    tuple val(sample_id), path("${sample_id}_final_report.html"), emit: report_html
 
     script:
     """
     python3 ${projectDir}/scripts/generate_report.py \\
-        --sample-id ${sample_id} \\
-        --fastq-qc ${fastq_qc_json} \\
-        --bam-qc ${bam_qc_json} \\
-        --fetal-fraction ${ff_json} \\
-        --variant-report ${variant_report_json} \\
-        --output-json ${sample_id}.final_report.json \\
-        --output-html ${sample_id}.final_report.html
+        --sample_id ${sample_id} \\
+        --fastq_qc ${fastq_qc_json} \\
+        --bam_qc ${bam_qc_json} \\
+        --fetal_fraction ${ff_json} \\
+        --variant_report ${variant_report_json} \\
+        --output_dir . \\
+        --output_prefix ${sample_id}
     """
 }

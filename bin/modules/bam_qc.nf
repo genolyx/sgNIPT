@@ -146,12 +146,13 @@ process MULTIQC {
 
     output:
     path("multiqc_report.html"),     emit: report
-    path("multiqc_data"),            emit: data
+    path("multiqc_report_data"),     emit: data
 
     script:
     """
     multiqc . \\
         --force \\
+        --filename multiqc_report \\
         --title "Single Gene NIPT Pipeline QC Report" \\
         --comment "Twist UCL_SingleGeneNIPT TE-96276661 (hg38) - Aggregated QC" \\
         -o .

@@ -21,17 +21,19 @@ process BWA_MEM2_ALIGN {
     script:
     def ref_prefix = bwa_index.find { it.name.endsWith('.fa') || it.name.endsWith('.fasta') || it.name.endsWith('.fa.gz') }?.name?.replaceAll(/\.(fa|fasta)(\.gz)?$/, '') ?: params.genome_prefix
     def rg = "@RG\\tID:${sample_id}\\tSM:${sample_id}\\tPL:ILLUMINA\\tLB:${sample_id}_lib"
+    // BWA uses index prefix from bwa_index_dir; BWA-MEM2 uses reference_fasta path
+    def bwa_idx = "${params.bwa_index_dir}/${file(params.reference_fasta).name}"
+    def align_cmd = params.aligner == 'bwa'
+        ? "bwa mem -t ${task.cpus} -R '${rg}' ${params.bwa_extra_args ?: ''} ${bwa_idx}"
+        : "bwa-mem2 mem -t ${task.cpus} -R '${rg}' ${params.bwa_extra_args ?: ''} ${params.reference_fasta}"
 
     if (reads instanceof List && reads.size() == 2)
         """
-        bwa-mem2 mem \\
-            -t ${task.cpus} \\
-            -R '${rg}' \\
-            ${params.bwa_extra_args ?: ''} \\
-            ${params.reference_fasta} \\
+        ${align_cmd} \\
             ${reads[0]} ${reads[1]} \\
         | samtools sort \\
             -@ ${task.cpus} \\
+            -m ${params.samtools_sort_mem} \\
             -o ${sample_id}.sorted.bam \\
             -
 
@@ -39,14 +41,11 @@ process BWA_MEM2_ALIGN {
         """
     else
         """
-        bwa-mem2 mem \\
-            -t ${task.cpus} \\
-            -R '${rg}' \\
-            ${params.bwa_extra_args ?: ''} \\
-            ${params.reference_fasta} \\
+        ${align_cmd} \\
             ${reads} \\
         | samtools sort \\
             -@ ${task.cpus} \\
+            -m ${params.samtools_sort_mem} \\
             -o ${sample_id}.sorted.bam \\
             -
 
@@ -87,15 +86,20 @@ process MARK_DUPLICATES {
         """
     else
         """
+        # samtools markdup requires fixmate (MS tag) first
+        samtools sort -n -@ ${task.cpus} -o ${sample_id}.nmsrt.bam ${bam}
+        samtools fixmate -m ${sample_id}.nmsrt.bam ${sample_id}.fixmate.bam
+        samtools sort -@ ${task.cpus} -o ${sample_id}.fixmate_srt.bam ${sample_id}.fixmate.bam
+
         samtools markdup \\
             -@ ${task.cpus} \\
             --write-index \\
             -s \\
-            ${bam} \\
+            ${sample_id}.fixmate_srt.bam \\
             ${sample_id}.dedup.bam
 
         # Capture markdup stats
-        samtools markdup -s ${bam} /dev/null 2> ${sample_id}.dedup_metrics.txt || true
+        samtools markdup -s ${sample_id}.fixmate_srt.bam /dev/null 2> ${sample_id}.dedup_metrics.txt || true
 
         if [ ! -f ${sample_id}.dedup.bam.bai ]; then
             samtools index -@ ${task.cpus} ${sample_id}.dedup.bam

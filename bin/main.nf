@@ -38,6 +38,7 @@ log.info """
   Zero-probe BED    : ${params.zero_probe_bed ?: 'not provided'}
   Gene list         : ${params.gene_list ?: 'not provided'}
   Reference         : ${params.reference_fasta}
+  Aligner           : ${params.aligner}
   Output directory  : ${params.outdir}
   Variant caller    : ${params.variant_caller}
   FF variant caller : ${params.ff_variant_caller}

@@ -10,15 +10,27 @@
 #    - Output path follows YYMM work_dir pattern
 #    - daemon polls for {ORDER_ID}.json + {ORDER_ID}.output.tar
 #
-#  Usage:
+#  Usage (minimal — FASTQ under fastq/{work_dir}/{order_id}/):
+#    export SGNIPT_ROOT_DIR=/path/to/sgNIPT
+#    ./run_sgnipt.sh --order_id NA12878_Twist_Exome --work_dir 2603
+#
+#  Explicit FASTQ paths (optional if auto-discovery works):
 #    ./run_sgnipt.sh \
-#        --order_id ORDER_001 \
-#        --sample_name "SAMPLE_A,SAMPLE_B" \
-#        --fastq_r1 "SAMPLE_A_R1.fastq.gz,SAMPLE_B_R1.fastq.gz" \
-#        --fastq_r2 "SAMPLE_A_R2.fastq.gz,SAMPLE_B_R2.fastq.gz" \
+#        --order_id NA12878_Twist_Exome \
+#        [--sample_name "NA12878_Twist_Exome"]   # default: same as order_id \
+#        [--fastq_r1 "2603/NA12878_Twist_Exome/file_R1.fastq.gz"] \
+#        [--fastq_r2 "2603/NA12878_Twist_Exome/file_R2.fastq.gz"] \
+#        [--work_dir 2603] \
+#        [--ref_dir ./data/refs]                # logged only; data mount unchanged \
 #        [--target_bed panel_v1.bed] \
 #        [--variant_caller bcftools] \
 #        [--detached]
+#
+#  Directory structure: {type}/{YYMM}/{SAMPLE}/
+#    fastq/2603/NA12878_Twist_Exome/   - input FASTQ
+#    analysis/2603/NA12878_Twist_Exome/ - Nextflow work, intermediates
+#    output/2603/NA12878_Twist_Exome/  - JSON, PNG for service-daemon
+#    log/2603/NA12878_Twist_Exome/     - analysis logs
 #
 #  Environment Variables (set by daemon or .env file):
 #    SGNIPT_ROOT_DIR     - Root directory for SgNIPT on host (required)
@@ -64,6 +76,8 @@ VARIANT_CALLER="bcftools"
 FF_VARIANT_CALLER="bcftools"
 EXTRA_ARGS=""
 DETACHED=false
+WORK_DIR_ARG=""
+REF_DIR=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -71,6 +85,8 @@ while [[ $# -gt 0 ]]; do
         --sample_name)       SAMPLE_NAMES="$2";      shift 2 ;;
         --fastq_r1)          FASTQ_R1="$2";          shift 2 ;;
         --fastq_r2)          FASTQ_R2="$2";          shift 2 ;;
+        --work_dir|-w)       WORK_DIR_ARG="$2";      shift 2 ;;
+        --ref_dir|-r)        REF_DIR="$2";           shift 2 ;;
         --target_bed)        TARGET_BED="$2";        shift 2 ;;
         --variant_caller)    VARIANT_CALLER="$2";    shift 2 ;;
         --ff_variant_caller) FF_VARIANT_CALLER="$2"; shift 2 ;;
@@ -83,25 +99,63 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# ── work_dir: YYMM pattern ───────────────────────────────────────────────────
+#  Structure: fastq|analysis|output|log / {YYMM} / {SAMPLE_NAME}/
+#  Priority: --work_dir > SGNIPT_WORK_DIR env > current date
+WORK_DIR="${WORK_DIR_ARG:-${SGNIPT_WORK_DIR:-$(date '+%y%m')}}"
+
+# ── Defaults (carrier-style: one sample id drives order + sample name) ─────
+if [[ -z "$SAMPLE_NAMES" ]]; then
+    SAMPLE_NAMES="${ORDER_ID}"
+fi
+
 # ── Validate required arguments ──────────────────────────────────────────────
 if [[ -z "$ORDER_ID" ]]; then
     echo "[ERROR] --order_id is required"
     exit 1
 fi
-if [[ -z "$SAMPLE_NAMES" ]]; then
-    echo "[ERROR] --sample_name is required"
-    exit 1
-fi
+
+# ── Auto-discover FASTQ under fastq/{work_dir}/{order_id}/ ─────────────────
+#  Expects e.g. * _R1.fastq.gz / _R2.fastq.gz (Illumina-style)
 if [[ -z "$FASTQ_R1" ]]; then
-    echo "[ERROR] --fastq_r1 is required"
-    exit 1
+    FASTQ_HOST_DIR="${HOST_FASTQ_DIR}/${WORK_DIR}/${ORDER_ID}"
+    if [[ ! -d "$FASTQ_HOST_DIR" ]]; then
+        echo "[ERROR] FASTQ directory not found: ${FASTQ_HOST_DIR}"
+        echo "[HINT]  Pass --work_dir and --order_id so that FASTQs live under fastq/{work_dir}/{order_id}/"
+        echo "       or set --fastq_r1 / --fastq_r2 explicitly."
+        exit 1
+    fi
+    mapfile -t _R1_CAND < <(find "$FASTQ_HOST_DIR" -maxdepth 1 -type f \( -name '*_R1.fastq.gz' -o -name '*_R1.fq.gz' \) | sort)
+    if [[ ${#_R1_CAND[@]} -eq 0 ]]; then
+        echo "[ERROR] No R1 FASTQ (*_R1.fastq.gz) found under: ${FASTQ_HOST_DIR}"
+        exit 1
+    fi
+    if [[ ${#_R1_CAND[@]} -gt 1 ]]; then
+        echo "[ERROR] Multiple R1 FASTQ files found; specify --fastq_r1 and --fastq_r2 explicitly:"
+        printf '  %s\n' "${_R1_CAND[@]}"
+        exit 1
+    fi
+    _R1_ABS="${_R1_CAND[0]}"
+    _BASE="$(basename "$_R1_ABS")"
+    _R2_ABS="${FASTQ_HOST_DIR}/${_BASE/_R1.fastq.gz/_R2.fastq.gz}"
+    [[ -f "$_R2_ABS" ]] || _R2_ABS="${FASTQ_HOST_DIR}/${_BASE/_R1.fq.gz/_R2.fq.gz}"
+    if [[ ! -f "$_R2_ABS" ]]; then
+        echo "[ERROR] Paired R2 not found for: ${_R1_ABS}"
+        echo "[ERROR] Expected: ${_R2_ABS}"
+        exit 1
+    fi
+    # Paths relative to HOST_FASTQ_DIR (container: /Work/SgNIPT/fastq/...)
+    FASTQ_R1="${WORK_DIR}/${ORDER_ID}/${_BASE}"
+    FASTQ_R2="${WORK_DIR}/${ORDER_ID}/$(basename "$_R2_ABS")"
+    echo "[INFO] Auto-selected FASTQ pair:"
+    echo "       R1: ${FASTQ_R1}"
+    echo "       R2: ${FASTQ_R2}"
 fi
 
-# ── work_dir: YYMM pattern (compatible with daemon's extract_work_dir) ───────
-#  The daemon uses extract_work_dir(order_id) to derive YYMM from order_id.
-#  Here we use the current date as fallback. The daemon can override this
-#  by setting SGNIPT_WORK_DIR environment variable before calling this script.
-WORK_DIR="${SGNIPT_WORK_DIR:-$(date '+%y%m')}"
+if [[ -z "$FASTQ_R1" ]]; then
+    echo "[ERROR] --fastq_r1 is required (or use auto-discovery with fastq/${WORK_DIR}/${ORDER_ID}/)"
+    exit 1
+fi
 
 # ── Ensure host directories exist ────────────────────────────────────────────
 for DIR in "$HOST_FASTQ_DIR" "$HOST_DATA_DIR" "$HOST_CONFIG_DIR" \
@@ -112,11 +166,14 @@ for DIR in "$HOST_FASTQ_DIR" "$HOST_DATA_DIR" "$HOST_CONFIG_DIR" \
     fi
 done
 
-# Create work_dir-based output directory (daemon monitors this path)
-# Pattern: {ROOT}/output/{YYMM}/{ORDER_ID}/{ORDER_ID}.json
+# Per-sample paths: {type}/{YYMM}/{ORDER_ID}/
+#  - analysis: Nextflow work dir, intermediates, samplesheet
+#  - output:   Final JSON, PNG for service-daemon
+#  - log:      Analysis logs
+ORDER_ANALYSIS_HOST="${HOST_ANALYSIS_DIR}/${WORK_DIR}/${ORDER_ID}"
 ORDER_OUTPUT_HOST="${HOST_OUTPUT_DIR}/${WORK_DIR}/${ORDER_ID}"
 ORDER_LOG_HOST="${HOST_LOG_DIR}/${WORK_DIR}/${ORDER_ID}"
-mkdir -p "${ORDER_OUTPUT_HOST}" "${ORDER_LOG_HOST}"
+mkdir -p "${ORDER_ANALYSIS_HOST}" "${ORDER_OUTPUT_HOST}" "${ORDER_LOG_HOST}"
 
 # ── Container name = ORDER_ID (daemon uses docker ps -f name=ORDER_ID) ──────
 CONTAINER_NAME="${ORDER_ID}"
@@ -153,23 +210,25 @@ echo "============================================================"
 echo "  Single Gene NIPT - Launching Docker Container"
 echo "============================================================"
 echo "  Order ID       : ${ORDER_ID}"
+echo "  Sample name    : ${SAMPLE_NAMES}"
+if [[ -n "${REF_DIR}" ]]; then
+    REF_DISPLAY="$(realpath "${REF_DIR}" 2>/dev/null || echo "${REF_DIR}")"
+    echo "  Reference dir  : ${REF_DISPLAY}  (informational; pipeline uses ${HOST_DATA_DIR} → /Work/SgNIPT/data)"
+fi
 echo "  Container Name : ${CONTAINER_NAME}"
+echo "  Work Dir       : ${WORK_DIR}"
+echo "  Analysis       : ${ORDER_ANALYSIS_HOST}"
+echo "  Output         : ${ORDER_OUTPUT_HOST}"
+echo "  Log            : ${ORDER_LOG_HOST}"
 echo "  Docker Image   : ${DOCKER_IMAGE}"
 echo "  CPU / Memory   : ${CONTAINER_CPUS} / ${CONTAINER_MEMORY}"
-echo "  Work Dir       : ${WORK_DIR}"
-echo "  Root Dir       : ${SGNIPT_ROOT_DIR}"
-echo "  Detached       : ${DETACHED}"
 echo "============================================================"
 
-#  Volume mounts follow the same pattern as sWGS NIPT:
-#    HOST_DIR → /Work/SgNIPT/{subdir}
-#
-#  The container's entrypoint.sh uses these internal paths.
-#  Output goes to /Work/SgNIPT/output/{ORDER_ID}/ which maps to:
-#    {ROOT}/output/{YYMM}/{ORDER_ID}/ on the host
-#
-#  NOTE: We mount the YYMM-level output dir so the container writes
-#  directly to the daemon-monitored path.
+#  Volume mounts: {type}/{YYMM}/{ORDER_ID}/ structure
+#    fastq/     → whole tree (fastq/2603/NA12878/...)
+#    analysis/  → analysis/2603/ORDER_ID (Nextflow work, intermediates)
+#    output/    → output/2603/ORDER_ID (JSON, PNG for service-daemon)
+#    log/       → log/2603/ORDER_ID (analysis logs)
 
 docker run \
     --user "$(id -u):$(id -g)" \
@@ -191,7 +250,7 @@ docker run \
     -v "${HOST_FASTQ_DIR}:/Work/SgNIPT/fastq" \
     -v "${HOST_DATA_DIR}:/Work/SgNIPT/data" \
     -v "${HOST_CONFIG_DIR}:/Work/SgNIPT/config" \
-    -v "${HOST_ANALYSIS_DIR}:/Work/SgNIPT/analysis" \
+    -v "${ORDER_ANALYSIS_HOST}:/Work/SgNIPT/analysis" \
     -v "${ORDER_OUTPUT_HOST}:/Work/SgNIPT/output/${ORDER_ID}" \
     -v "${ORDER_LOG_HOST}:/Work/SgNIPT/log/${ORDER_ID}" \
     --cpus "${CONTAINER_CPUS}" \
@@ -204,9 +263,11 @@ DOCKER_EXIT=$?
 if [[ $DOCKER_EXIT -eq 0 ]]; then
     echo "[INFO] Container '${CONTAINER_NAME}' started successfully (detached)"
     echo "[INFO] Monitor logs     : docker logs -f ${CONTAINER_NAME}"
-    echo "[INFO] Daemon polls for : ${ORDER_OUTPUT_HOST}/${ORDER_ID}.json"
+    echo "[INFO] Analysis dir    : ${ORDER_ANALYSIS_HOST}"
+    echo "[INFO] Output dir      : ${ORDER_OUTPUT_HOST}"
+    echo "[INFO] Log dir         : ${ORDER_LOG_HOST}"
+    echo "[INFO] Service-daemon  : ${ORDER_OUTPUT_HOST}/${ORDER_ID}.json"
     echo "[INFO]                    ${ORDER_OUTPUT_HOST}/${ORDER_ID}.output.tar"
-    echo "[INFO] Progress file    : ${ORDER_OUTPUT_HOST}/${ORDER_ID}_progress.txt"
 else
     echo "[ERROR] Failed to start container '${CONTAINER_NAME}' (exit: ${DOCKER_EXIT})"
     exit $DOCKER_EXIT

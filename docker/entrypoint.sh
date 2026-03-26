@@ -43,10 +43,10 @@ LOG_DIR="/Work/SgNIPT/log"
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
 PIPELINE_VERSION="1.1.0"
 
-# ── Logging functions ────────────────────────────────────────────────────────
-log_info()  { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO]  $*" | tee -a "${LOG_DIR}/entrypoint.log"; }
-log_warn()  { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [WARN]  $*" | tee -a "${LOG_DIR}/entrypoint.log"; }
-log_error() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [ERROR] $*" | tee -a "${LOG_DIR}/entrypoint.log"; }
+# ── Logging functions (use ORDER_LOG_DIR set below) ────────────────────────────
+log_info()  { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [INFO]  $*" | tee -a "${ENTRYPOINT_LOG:-/tmp/entrypoint.log}"; }
+log_warn()  { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [WARN]  $*" | tee -a "${ENTRYPOINT_LOG:-/tmp/entrypoint.log}"; }
+log_error() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [ERROR] $*" | tee -a "${ENTRYPOINT_LOG:-/tmp/entrypoint.log}"; }
 
 # ── Progress tracking (daemon-compatible) ────────────────────────────────────
 update_progress() {
@@ -97,12 +97,17 @@ if [[ -z "$FASTQ_R1_FILES" ]]; then
     exit 1
 fi
 
-# ── Prepare output directories early (for progress tracking) ─────────────────
+# ── Per-sample paths (analysis/output/log mounted as {YYMM}/{ORDER_ID}/) ─────
+#  ANALYSIS_DIR = analysis/2603/ORDER_ID (Nextflow work, intermediates)
+#  ORDER_OUTPUT_DIR = output/2603/ORDER_ID (JSON, PNG for service-daemon)
+#  ORDER_LOG_DIR = log/2603/ORDER_ID (analysis logs)
 ORDER_OUTPUT_DIR="${OUTPUT_DIR}/${ORDER_ID}"
 ORDER_LOG_DIR="${LOG_DIR}/${ORDER_ID}"
-WORK_DIR="${ANALYSIS_DIR}/${ORDER_ID}_work"
+WORK_DIR="${ANALYSIS_DIR}/work"
+ENTRYPOINT_LOG="${ORDER_LOG_DIR}/entrypoint.log"
 
-mkdir -p "${ORDER_OUTPUT_DIR}" "${ORDER_LOG_DIR}" "${WORK_DIR}"
+# NXF_TEMP is set to analysis/tmp; must exist for Nextflow mktemp
+mkdir -p "${ORDER_OUTPUT_DIR}" "${ORDER_LOG_DIR}" "${WORK_DIR}" "${ANALYSIS_DIR}/tmp"
 
 log_info "============================================================"
 log_info "  Single Gene NIPT Pipeline v${PIPELINE_VERSION} - Starting"
@@ -121,8 +126,11 @@ update_progress "INIT" "Pipeline starting for order ${ORDER_ID}"
 log_info "Detecting reference files in ${DATA_DIR} ..."
 update_progress "INIT" "Detecting reference files"
 
-# Reference FASTA
-REF_FASTA=$(find "${DATA_DIR}/reference" -name "*.fa" -o -name "*.fasta" 2>/dev/null | head -1)
+# Reference FASTA (use ls/glob: find can fail on Docker bind mounts)
+REF_FASTA=""
+for f in "${DATA_DIR}/reference"/*.fasta "${DATA_DIR}/reference"/*.fa; do
+    [[ -f "$f" ]] && REF_FASTA="$f" && break
+done
 if [[ -z "$REF_FASTA" ]]; then
     log_error "No reference FASTA found in ${DATA_DIR}/reference/"
     update_progress "ERROR" "No reference FASTA found"
@@ -152,12 +160,24 @@ update_progress "INIT" "Detecting Twist panel BED files"
 BED_DIR="${DATA_DIR}/target_bed"
 
 # 1. Target BED (All_target_regions) — primary target for variant calling & QC
+# Use glob (find can fail on Docker bind mounts)
 if [[ -n "$TARGET_BED_NAME" ]]; then
     TARGET_BED="${BED_DIR}/${TARGET_BED_NAME}"
 else
-    TARGET_BED=$(find "${BED_DIR}" -name "All_target_regions*.bed" 2>/dev/null | head -1)
+    TARGET_BED=""
+    for f in "${BED_DIR}"/All_target_regions*.bed; do
+        [[ -f "$f" ]] && TARGET_BED="$f" && break
+    done
     if [[ -z "$TARGET_BED" ]]; then
-        TARGET_BED=$(find "${BED_DIR}" -name "*.bed" -not -name "Probes*" -not -name "Target_bases*" -not -name "Target_regions_with_zero*" -not -name "ff_snps*" 2>/dev/null | head -1)
+        for f in "${BED_DIR}"/*.bed; do
+            [[ -f "$f" ]] || continue
+            base=$(basename "$f")
+            [[ "$base" == Probes* ]] && continue
+            [[ "$base" == Target_bases* ]] && continue
+            [[ "$base" == Target_regions_with_zero* ]] && continue
+            [[ "$base" == ff_snps* ]] && continue
+            TARGET_BED="$f" && break
+        done
     fi
 fi
 if [[ -z "$TARGET_BED" ]] || [[ ! -f "$TARGET_BED" ]]; then
@@ -168,7 +188,8 @@ fi
 log_info "Target BED     : ${TARGET_BED}"
 
 # 2. FF SNPs BED — common SNP positions for Fetal Fraction estimation
-FF_SNPS_BED=$(find "${BED_DIR}" -name "ff_snps*.bed" 2>/dev/null | head -1)
+FF_SNPS_BED=""
+for f in "${BED_DIR}"/ff_snps*.bed; do [[ -f "$f" ]] && FF_SNPS_BED="$f" && break; done
 FF_SNPS_ARG=""
 if [[ -n "$FF_SNPS_BED" ]] && [[ -f "$FF_SNPS_BED" ]]; then
     FF_SNPS_ARG="--ff_snps_bed ${FF_SNPS_BED}"
@@ -179,7 +200,8 @@ else
 fi
 
 # 3. Probes BED — probe coverage QC
-PROBES_BED=$(find "${BED_DIR}" -name "Probes_merged*.bed" 2>/dev/null | head -1)
+PROBES_BED=""
+for f in "${BED_DIR}"/Probes_merged*.bed; do [[ -f "$f" ]] && PROBES_BED="$f" && break; done
 PROBES_ARG=""
 if [[ -n "$PROBES_BED" ]] && [[ -f "$PROBES_BED" ]]; then
     PROBES_ARG="--probes_bed ${PROBES_BED}"
@@ -189,7 +211,8 @@ else
 fi
 
 # 4. Zero-probe BED — flagging uncovered target regions
-ZERO_PROBE_BED=$(find "${BED_DIR}" -name "Target_regions_with_zero_probes*.bed" 2>/dev/null | head -1)
+ZERO_PROBE_BED=""
+for f in "${BED_DIR}"/Target_regions_with_zero_probes*.bed; do [[ -f "$f" ]] && ZERO_PROBE_BED="$f" && break; done
 ZERO_PROBE_ARG=""
 if [[ -n "$ZERO_PROBE_BED" ]] && [[ -f "$ZERO_PROBE_BED" ]]; then
     ZERO_PROBE_ARG="--zero_probe_bed ${ZERO_PROBE_BED}"
@@ -201,9 +224,10 @@ else
 fi
 
 # 5. Gene list — for gene coverage validation
-GENE_LIST=$(find "${BED_DIR}" -name "gene_list*" -o -name "singleGene*" 2>/dev/null | head -1)
+GENE_LIST=""
+for f in "${BED_DIR}"/gene_list* "${BED_DIR}"/singleGene*; do [[ -f "$f" ]] && GENE_LIST="$f" && break; done
 if [[ -z "$GENE_LIST" ]]; then
-    GENE_LIST=$(find "${DATA_DIR}" -name "gene_list*" -o -name "singleGene*" 2>/dev/null | head -1)
+    for f in "${DATA_DIR}"/gene_list* "${DATA_DIR}"/singleGene*; do [[ -f "$f" ]] && GENE_LIST="$f" && break; done
 fi
 GENE_LIST_ARG=""
 if [[ -n "$GENE_LIST" ]] && [[ -f "$GENE_LIST" ]]; then
@@ -216,7 +240,7 @@ fi
 update_progress "INIT" "BED files detected successfully"
 
 # ── Generate samplesheet ────────────────────────────────────────────────────
-SAMPLESHEET="${ANALYSIS_DIR}/${ORDER_ID}_samplesheet.csv"
+SAMPLESHEET="${ANALYSIS_DIR}/samplesheet.csv"
 log_info "Generating samplesheet: ${SAMPLESHEET}"
 update_progress "INIT" "Generating samplesheet"
 
@@ -287,11 +311,13 @@ update_progress "PIPELINE" "Launching Nextflow pipeline"
 
 NF_LOG="${ORDER_LOG_DIR}/nextflow_${TIMESTAMP}.log"
 
-cd "${PIPELINE_DIR}"
+# Run from ANALYSIS_DIR so .nextflow/ is writable (pipeline dir is root-owned in image)
+cd "${ANALYSIS_DIR}"
 
 # Build the Nextflow command
-NF_CMD="nextflow run main.nf \
+NF_CMD="nextflow run ${PIPELINE_DIR}/main.nf \
     -profile docker_internal \
+    -resume \
     ${NF_PARAMS_FILE} \
     --input ${SAMPLESHEET} \
     --target_bed ${TARGET_BED} \

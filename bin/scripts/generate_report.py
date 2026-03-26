@@ -543,8 +543,8 @@ def generate_html_report(report: Dict[str, Any]) -> str:
     ff_data = report.get("fetal_fraction")
     if ff_data:
         ff_value = ff_data.get("primary_fetal_fraction")
-        ff_method = ff_data.get("primary_method", "N/A")
-        ff_status = ff_data.get("status", "N/A")
+        ff_method = ff_data.get("primary_method") or "N/A"
+        ff_status = ff_data.get("status") or "N/A"
         ff_display = f"{ff_value:.1%}" if ff_value is not None else "N/A"
         ff_class = "pass" if ff_status == "PASS" else ("fail" if ff_status in ("FAILED", "LOW_FF") else "warn")
 
@@ -561,7 +561,7 @@ def generate_html_report(report: Dict[str, Any]) -> str:
                 <div class="label">Fetal Fraction</div>
             </div>
             <div class="metric-box">
-                <div class="value">{ff_method.replace('_', ' ').title()}</div>
+                <div class="value">{(ff_method or 'N/A').replace('_', ' ').title()}</div>
                 <div class="label">Primary Method</div>
             </div>
             <div class="metric-box">

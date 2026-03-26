@@ -43,7 +43,7 @@ process VARIANT_CALL_TARGET {
 
         bcftools index -t ${sample_id}.target_variants.vcf.gz
         """
-    else if (params.variant_caller == 'gatk')
+    else if (params.variant_caller == 'mutect2')
         """
         gatk Mutect2 \\
             -R ${reference_fasta} \\
@@ -53,11 +53,36 @@ process VARIANT_CALL_TARGET {
             --callable-depth ${params.vc_min_depth} \\
             -O ${sample_id}.target_variants.raw.vcf.gz
 
-        # Filter variants
         gatk FilterMutectCalls \\
             -R ${reference_fasta} \\
             -V ${sample_id}.target_variants.raw.vcf.gz \\
             -O ${sample_id}.target_variants.vcf.gz
+
+        bcftools index -t ${sample_id}.target_variants.vcf.gz
+        """
+    else if (params.variant_caller == 'gatk')
+        """
+        # carrier-screening CALL_VARIANTS parity: HaplotypeCaller + VariantFiltration (germline WES)
+        gatk HaplotypeCaller \\
+            -R ${reference_fasta} \\
+            -I ${bam} \\
+            -L ${target_bed} \\
+            --interval-padding 100 \\
+            -O ${sample_id}.hc_raw.vcf.gz \\
+            -ERC NONE \\
+            --create-output-variant-index true
+
+        gatk VariantFiltration \\
+            -R ${reference_fasta} \\
+            -V ${sample_id}.hc_raw.vcf.gz \\
+            -O ${sample_id}.target_variants.vcf.gz \\
+            --filter-expression "QD < 1.5" --filter-name "QD1.5" \\
+            --filter-expression "QUAL < 30.0" --filter-name "QUAL30" \\
+            --filter-expression "SOR > 4.0" --filter-name "SOR4" \\
+            --filter-expression "FS > 80.0" --filter-name "FS80" \\
+            --filter-expression "MQ < 30.0" --filter-name "MQ30" \\
+            --filter-expression "MQRankSum < -12.5" --filter-name "MQRankSum-12.5" \\
+            --filter-expression "ReadPosRankSum < -8.0" --filter-name "ReadPosRankSum-8"
 
         bcftools index -t ${sample_id}.target_variants.vcf.gz
         """
@@ -165,8 +190,8 @@ process VARIANT_ANALYSIS {
     def gene_list_arg = gene_list.name != 'NO_GENE_LIST' ? "--gene-list ${gene_list}" : ""
 
     """
-    # Extract fetal fraction value from JSON
-    FF=\$(python3 -c "import json; d=json.load(open('${ff_json}')); print(d.get('primary_fetal_fraction', 0.05))")
+    # Extract fetal fraction value from JSON (handle None when FF estimation failed)
+    FF=\$(python3 -c "import json; d=json.load(open('${ff_json}')); v=d.get('primary_fetal_fraction'); print(v if v is not None else 0.05)")
 
     python3 ${projectDir}/scripts/variant_analysis.py \\
         --sample-id ${sample_id} \\
