@@ -1,8 +1,7 @@
 #!/usr/bin/env nextflow
-
 /*
  * ============================================================================
- *  Single Gene NIPT Pipeline v1.1.0
+ *  Single Gene NIPT Pipeline v1.2.0
  * ============================================================================
  *  Non-Invasive Prenatal Testing pipeline for single gene disorder screening
  *  using cell-free DNA (cfDNA) from maternal plasma.
@@ -13,11 +12,18 @@
  *    - 29 zero-probe regions flagged in QC
  *
  *  Pipeline flow:
- *    FASTQ → Preprocessing → Alignment → BAM QC → Fetal Fraction Estimation
- *    → Variant Calling → Variant Analysis → Report Generation
+ *    FASTQ → Preprocessing → Alignment (BWA-MEM or BWA-MEM2)
+ *    → BAM QC → Fetal Fraction Estimation
+ *    → Variant Calling (bcftools / GATK / Mutect2)
+ *    → [VEP Annotation]  ← NEW (skip_vep=false)
+ *    → Variant Analysis → Report Generation
+ *
+ *  Shared Reference:
+ *    /data/reference/genomes/GRCh38/   (FASTA, bwa_index, bwa_mem2_index)
+ *    /data/reference/annotation/vep_cache/  (shared with carrier-screening)
  *
  *  Author  : Single Gene NIPT Team
- *  Version : 1.1.0
+ *  Version : 1.2.0
  * ============================================================================
  */
 
@@ -39,11 +45,12 @@ log.info """
   Gene list         : ${params.gene_list ?: 'not provided'}
   Reference         : ${params.reference_fasta}
   Aligner           : ${params.aligner}
-  Output directory  : ${params.outdir}
   Variant caller    : ${params.variant_caller}
   FF variant caller : ${params.ff_variant_caller}
+  VEP annotation    : ${params.skip_vep ? 'DISABLED (snpEff fallback in daemon)' : 'ENABLED'}
+  Output directory  : ${params.outdir}
   ─────────────────────────────────────────────────────────────────
-"""
+""".stripIndent()
 
 // ── Include modules ─────────────────────────────────────────────────────────
 include { FASTP; FASTQ_QC }                                            from './modules/preprocessing'
@@ -55,6 +62,7 @@ include { COLLECT_FRAGMENT_SIZES; SAMTOOLS_IDXSTATS;
           ESTIMATE_FETAL_FRACTION }                                     from './modules/fetal_fraction'
 include { VARIANT_CALL_TARGET; FILTER_VARIANTS;
           ANNOTATE_VARIANTS; VARIANT_ANALYSIS }                        from './modules/variant_calling'
+include { VEP_ANNOTATION }                                             from './modules/annotation'
 include { GENERATE_REPORT }                                            from './modules/reporting'
 
 
@@ -93,7 +101,12 @@ workflow {
     ch_target_bed  = Channel.fromPath(params.target_bed)
     ch_ref_fasta   = Channel.fromPath(params.reference_fasta)
     ch_ref_fai     = Channel.fromPath("${params.reference_fasta}.fai")
-    ch_bwa_index   = Channel.fromPath("${params.bwa_index_dir}/*").collect()
+
+    // Aligner index channel: BWA-MEM2 uses bwa_mem2_index_dir, BWA uses bwa_index_dir
+    def index_dir  = (params.aligner == 'bwa-mem2')
+        ? params.bwa_mem2_index_dir
+        : params.bwa_index_dir
+    ch_bwa_index   = Channel.fromPath("${index_dir}/*").collect()
 
     // FF SNPs BED: use dedicated ff_snps_bed if provided, otherwise fall back to target_bed
     ch_ff_snps_bed = params.ff_snps_bed
@@ -113,7 +126,7 @@ workflow {
     FASTQ_QC(FASTP.out.fastp_json)
 
     // ══════════════════════════════════════════════════════════════════════
-    // STEP 2: Alignment
+    // STEP 2: Alignment  (BWA-MEM or BWA-MEM2 — selected by params.aligner)
     // ══════════════════════════════════════════════════════════════════════
     BWA_MEM2_ALIGN(
         FASTP.out.trimmed_reads,
@@ -128,14 +141,8 @@ workflow {
         BWA_MEM2_ALIGN.out.sorted_bai,
     )
 
-    // Create combined bam+bai channel for downstream processes
-    ch_dedup = join_bam_bai(
-        MARK_DUPLICATES.out.dedup_bam,
-        MARK_DUPLICATES.out.dedup_bai,
-    )
-
     // ══════════════════════════════════════════════════════════════════════
-    // STEP 4: Extract Target Region Reads
+    // STEP 4: Extract Target Reads
     // ══════════════════════════════════════════════════════════════════════
     EXTRACT_TARGET_READS(
         MARK_DUPLICATES.out.dedup_bam,
@@ -143,7 +150,7 @@ workflow {
         ch_target_bed.first(),
     )
 
-    ch_target = join_bam_bai(
+    ch_dedup = join_bam_bai(
         EXTRACT_TARGET_READS.out.target_bam,
         EXTRACT_TARGET_READS.out.target_bai,
     )
@@ -152,19 +159,15 @@ workflow {
     // STEP 5: BAM Quality Control
     // ══════════════════════════════════════════════════════════════════════
     SAMTOOLS_FLAGSTAT(ch_dedup)
-
     SAMTOOLS_STATS(ch_dedup)
-
     MOSDEPTH(
         ch_dedup,
         ch_target_bed.first(),
     )
-
     ON_TARGET_COUNT(
         ch_dedup,
         ch_target_bed.first(),
     )
-
     BAM_QC_EVALUATE(
         SAMTOOLS_FLAGSTAT.out.flagstat,
         SAMTOOLS_STATS.out.stats,
@@ -178,24 +181,14 @@ workflow {
     // ══════════════════════════════════════════════════════════════════════
     // STEP 6: Fetal Fraction Estimation
     // ══════════════════════════════════════════════════════════════════════
-
-    // 6a. Collect fragment size distribution + chromosome read counts
-    //     (ChrX-based FF supplementary since no Y-chr targets in panel)
     COLLECT_FRAGMENT_SIZES(ch_dedup)
-
-    // 6b. samtools idxstats for ChrX-based FF estimation
     SAMTOOLS_IDXSTATS(ch_dedup)
-
-    // 6c. Variant calling at FF SNP sites
-    //     Uses ff_snps_bed (dedicated common SNP list) for better FF estimation
     VARIANT_CALL_FOR_FF(
         ch_dedup,
         ch_ff_snps_bed.first(),
         ch_ref_fasta.first(),
         ch_ref_fai.first(),
     )
-
-    // 6d. Estimate fetal fraction (SNP-based primary + ChrX/fragment supplementary)
     ESTIMATE_FETAL_FRACTION(
         VARIANT_CALL_FOR_FF.out.ff_vcf,
         SAMTOOLS_IDXSTATS.out.idxstats,
@@ -206,6 +199,12 @@ workflow {
     // ══════════════════════════════════════════════════════════════════════
     // STEP 7: Variant Calling at Target Loci
     // ══════════════════════════════════════════════════════════════════════
+    // ch_target: tuple(sample_id, bam, bai)
+    ch_target = join_bam_bai(
+        EXTRACT_TARGET_READS.out.target_bam,
+        EXTRACT_TARGET_READS.out.target_bai,
+    )
+
     VARIANT_CALL_TARGET(
         ch_target,
         ch_target_bed.first(),
@@ -218,8 +217,23 @@ workflow {
         VARIANT_CALL_TARGET.out.target_vcf_idx,
     )
 
-    // Optional annotation
-    if (params.run_annotation) {
+    // ══════════════════════════════════════════════════════════════════════
+    // STEP 7b: VEP Annotation (NEW — mirrors carrier-screening)
+    // ══════════════════════════════════════════════════════════════════════
+    //  skip_vep = false (default): VEP writes gnomAD AF, SIFT, PolyPhen,
+    //    HGVSc/p, MANE, dbSNP into INFO/CSQ.
+    //    service-daemon reads CSQ → no local gnomAD VCF lookup needed.
+    //
+    //  skip_vep = true: pass filtered VCF directly to variant analysis;
+    //    service-daemon falls back to snpEff + local gnomAD annotation.
+    if (!params.skip_vep) {
+        VEP_ANNOTATION(
+            FILTER_VARIANTS.out.filtered_vcf,
+            ch_ref_fasta.first(),
+            ch_ref_fai.first(),
+        )
+        ch_analysis_vcf = VEP_ANNOTATION.out.vep_vcf
+    } else if (params.run_annotation) {
         ANNOTATE_VARIANTS(FILTER_VARIANTS.out.filtered_vcf)
         ch_analysis_vcf = ANNOTATE_VARIANTS.out.annotated_vcf
     } else {
@@ -259,13 +273,12 @@ workflow {
         .mix(MOSDEPTH.out.global_dist.map { it[1] })
         .mix(MOSDEPTH.out.region_dist.map { it[1] })
         .collect()
-
     MULTIQC(ch_multiqc_files)
 }
 
-
 // ── Workflow completion handler ─────────────────────────────────────────────
 workflow.onComplete {
+    def vep_status = params.skip_vep ? 'SKIPPED' : 'COMPLETED'
     log.info """
     ══════════════════════════════════════════════════════════════════
     Pipeline execution summary
@@ -276,10 +289,11 @@ workflow.onComplete {
       Exit status  : ${workflow.exitStatus}
       Work dir     : ${workflow.workDir}
       Output dir   : ${params.outdir}
+      Aligner      : ${params.aligner}
+      VEP          : ${vep_status}
     ══════════════════════════════════════════════════════════════════
     """.stripIndent()
 }
-
 workflow.onError {
     log.error """
     ══════════════════════════════════════════════════════════════════
