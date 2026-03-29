@@ -37,14 +37,18 @@ process VEP_ANNOTATION {
     tuple val(sample_id), path("${sample_id}.vep_summary.html"), emit: vep_summary, optional: true
 
     script:
-    def cache_dir = params.vep_cache_dir ?: '/opt/vep/.vep'
-    def assembly  = 'GRCh38'
-    def species   = 'homo_sapiens'
-    // Input may be .vcf or .vcf.gz — VEP handles both
-    def input_vcf = vcf.name.endsWith('.gz') ? vcf : vcf
+    def cache_dir    = params.vep_cache_dir ?: '/opt/vep/.vep'
+    def assembly     = 'GRCh38'
+    def species      = 'homo_sapiens'
+    // ClinVar --custom option: requires bgzipped+tabixed ClinVar VCF at params.clinvar_vcf
+    def clinvar_arg  = params.clinvar_vcf
+        ? "--custom ${params.clinvar_vcf},ClinVar,vcf,exact,0,CLNSIG,CLNDN,CLNREVSTAT,CLNHGVS"
+        : ""
     """
+    export HOME=\$PWD
+
     vep \\
-        --input_file  ${input_vcf} \\
+        --input_file  ${vcf} \\
         --output_file ${sample_id}.vep.vcf \\
         --format vcf \\
         --vcf \\
@@ -72,7 +76,8 @@ process VEP_ANNOTATION {
         --no_progress \\
         --fork ${task.cpus} \\
         --stats_file ${sample_id}.vep_summary.html \\
-        --warning_file ${sample_id}.vep_warnings.txt
+        --warning_file ${sample_id}.vep_warnings.txt \\
+        ${clinvar_arg}
 
     # Compress and index
     bgzip -@ ${task.cpus} ${sample_id}.vep.vcf

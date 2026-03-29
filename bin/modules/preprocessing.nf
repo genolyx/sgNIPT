@@ -64,6 +64,7 @@ process FASTQ_QC {
     script:
     def threshold_arg = params.fastq_qc_thresholds ? "--thresholds ${params.fastq_qc_thresholds}" : ""
     """
+    export HOME=\$PWD
     python3 ${projectDir}/scripts/fastq_qc.py \\
         --fastp-json ${fastp_json} \\
         --sample-id ${sample_id} \\

@@ -44,9 +44,9 @@ log.info """
   Zero-probe BED    : ${params.zero_probe_bed ?: 'not provided'}
   Gene list         : ${params.gene_list ?: 'not provided'}
   Reference         : ${params.reference_fasta}
-  Aligner           : ${params.aligner}
-  Variant caller    : ${params.variant_caller}
-  FF variant caller : ${params.ff_variant_caller}
+  Aligner           : bwa-mem2 (fixed)
+  Variant caller    : bcftools (fixed)
+  FF variant caller : bcftools (fixed)
   VEP annotation    : ${params.skip_vep ? 'DISABLED (snpEff fallback in daemon)' : 'ENABLED'}
   Output directory  : ${params.outdir}
   ─────────────────────────────────────────────────────────────────
@@ -61,7 +61,7 @@ include { COLLECT_FRAGMENT_SIZES; SAMTOOLS_IDXSTATS;
           MPILEUP_AT_SNPS; VARIANT_CALL_FOR_FF;
           ESTIMATE_FETAL_FRACTION }                                     from './modules/fetal_fraction'
 include { VARIANT_CALL_TARGET; FILTER_VARIANTS;
-          ANNOTATE_VARIANTS; VARIANT_ANALYSIS }                        from './modules/variant_calling'
+          VARIANT_ANALYSIS }                                           from './modules/variant_calling'
 include { VEP_ANNOTATION }                                             from './modules/annotation'
 include { GENERATE_REPORT }                                            from './modules/reporting'
 
@@ -102,11 +102,7 @@ workflow {
     ch_ref_fasta   = Channel.fromPath(params.reference_fasta)
     ch_ref_fai     = Channel.fromPath("${params.reference_fasta}.fai")
 
-    // Aligner index channel: BWA-MEM2 uses bwa_mem2_index_dir, BWA uses bwa_index_dir
-    def index_dir  = (params.aligner == 'bwa-mem2')
-        ? params.bwa_mem2_index_dir
-        : params.bwa_index_dir
-    ch_bwa_index   = Channel.fromPath("${index_dir}/*").collect()
+    ch_bwa_index   = Channel.fromPath("${params.bwa_mem2_index_dir}/*").collect()
 
     // FF SNPs BED: use dedicated ff_snps_bed if provided, otherwise fall back to target_bed
     ch_ff_snps_bed = params.ff_snps_bed
@@ -126,7 +122,7 @@ workflow {
     FASTQ_QC(FASTP.out.fastp_json)
 
     // ══════════════════════════════════════════════════════════════════════
-    // STEP 2: Alignment  (BWA-MEM or BWA-MEM2 — selected by params.aligner)
+    // STEP 2: Alignment  (BWA-MEM2 — fixed)
     // ══════════════════════════════════════════════════════════════════════
     BWA_MEM2_ALIGN(
         FASTP.out.trimmed_reads,
@@ -218,38 +214,43 @@ workflow {
     )
 
     // ══════════════════════════════════════════════════════════════════════
-    // STEP 7b: VEP Annotation (NEW — mirrors carrier-screening)
+    // STEP 8: Variant Analysis — Fetal genotype classification + VCF filter
     // ══════════════════════════════════════════════════════════════════════
-    //  skip_vep = false (default): VEP writes gnomAD AF, SIFT, PolyPhen,
-    //    HGVSc/p, MANE, dbSNP into INFO/CSQ.
-    //    service-daemon reads CSQ → no local gnomAD VCF lookup needed.
-    //
-    //  skip_vep = true: pass filtered VCF directly to variant analysis;
-    //    service-daemon falls back to snpEff + local gnomAD annotation.
-    if (!params.skip_vep) {
-        VEP_ANNOTATION(
-            FILTER_VARIANTS.out.filtered_vcf,
-            ch_ref_fasta.first(),
-            ch_ref_fai.first(),
-        )
-        ch_analysis_vcf = VEP_ANNOTATION.out.vep_vcf
-    } else if (params.run_annotation) {
-        ANNOTATE_VARIANTS(FILTER_VARIANTS.out.filtered_vcf)
-        ch_analysis_vcf = ANNOTATE_VARIANTS.out.annotated_vcf
-    } else {
-        ch_analysis_vcf = FILTER_VARIANTS.out.filtered_vcf
-    }
-
-    // ══════════════════════════════════════════════════════════════════════
-    // STEP 8: Variant Analysis (Fetal genotype determination)
-    // ══════════════════════════════════════════════════════════════════════
+    //  Outputs:
+    //    variant_report.json  — full JSON with all classified variants
+    //    fetal_variants.vcf   — fetal-only VCF (origin ∈ {fetal_specific,
+    //                           maternal, maternal_het} and fetus ≠ likely_ref)
+    //                           sent downstream for VEP + ClinVar annotation
     VARIANT_ANALYSIS(
-        ch_analysis_vcf,
+        FILTER_VARIANTS.out.filtered_vcf,
         ESTIMATE_FETAL_FRACTION.out.ff_json,
         ch_target_bed.first(),
         ch_zero_probe_bed.first(),
         ch_gene_list.first(),
     )
+
+    // ══════════════════════════════════════════════════════════════════════
+    // STEP 8b: VEP + ClinVar Annotation on fetal-only VCF
+    // ══════════════════════════════════════════════════════════════════════
+    //  skip_vep = false (default, recommended):
+    //    VEP annotates fetal_variants.vcf with gnomAD AF, SIFT, PolyPhen,
+    //    HGVSc/p, MANE, dbSNP, and ClinVar (CLNSIG/CLNDN via --custom).
+    //    generate_report.py reads CSQ → enriches daemon JSON automatically.
+    //
+    //  skip_vep = true: report is generated from variant_report.json only;
+    //    daemon falls back to snpEff + local gnomAD annotation.
+    if (!params.skip_vep) {
+        VEP_ANNOTATION(
+            VARIANT_ANALYSIS.out.fetal_vcf,
+            ch_ref_fasta.first(),
+            ch_ref_fai.first(),
+        )
+        ch_annotated_vcf = VEP_ANNOTATION.out.vep_vcf
+    } else {
+        // skip_vep=true: pass per-sample dummy so GENERATE_REPORT's join works
+        ch_annotated_vcf = VARIANT_ANALYSIS.out.fetal_vcf
+            .map { sample_id, _vcf -> tuple(sample_id, file("NO_ANNOTATED_VCF")) }
+    }
 
     // ══════════════════════════════════════════════════════════════════════
     // STEP 9: Report Generation
@@ -259,6 +260,7 @@ workflow {
         BAM_QC_EVALUATE.out.bam_qc_json,
         ESTIMATE_FETAL_FRACTION.out.ff_json,
         VARIANT_ANALYSIS.out.variant_report,
+        ch_annotated_vcf,
     )
 
     // ══════════════════════════════════════════════════════════════════════
@@ -289,7 +291,7 @@ workflow.onComplete {
       Exit status  : ${workflow.exitStatus}
       Work dir     : ${workflow.workDir}
       Output dir   : ${params.outdir}
-      Aligner      : ${params.aligner}
+      Aligner      : bwa-mem2 (fixed)
       VEP          : ${vep_status}
     ══════════════════════════════════════════════════════════════════
     """.stripIndent()

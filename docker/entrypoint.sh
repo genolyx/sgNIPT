@@ -25,7 +25,6 @@
 #    --fastq_r1        FASTQ_R1_FILES  (required, comma-separated)
 #    --fastq_r2        FASTQ_R2_FILES  (optional, comma-separated)
 #    --target_bed      TARGET_BED_NAME (optional, default: auto-detect)
-#    --variant_caller  CALLER          (optional, default: bcftools)
 #    --extra_args      "..."           (optional, extra Nextflow arguments)
 ###############################################################################
 
@@ -62,20 +61,16 @@ SAMPLE_NAMES=""
 FASTQ_R1_FILES=""
 FASTQ_R2_FILES=""
 TARGET_BED_NAME=""
-VARIANT_CALLER="bcftools"
-FF_VARIANT_CALLER="bcftools"
 EXTRA_NF_ARGS=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --order_id)          ORDER_ID="$2";          shift 2 ;;
-        --sample_name)       SAMPLE_NAMES="$2";      shift 2 ;;
-        --fastq_r1)          FASTQ_R1_FILES="$2";    shift 2 ;;
-        --fastq_r2)          FASTQ_R2_FILES="$2";    shift 2 ;;
-        --target_bed)        TARGET_BED_NAME="$2";   shift 2 ;;
-        --variant_caller)    VARIANT_CALLER="$2";    shift 2 ;;
-        --ff_variant_caller) FF_VARIANT_CALLER="$2"; shift 2 ;;
-        --extra_args)        EXTRA_NF_ARGS="$2";     shift 2 ;;
+        --order_id)   ORDER_ID="$2";       shift 2 ;;
+        --sample_name) SAMPLE_NAMES="$2";  shift 2 ;;
+        --fastq_r1)   FASTQ_R1_FILES="$2"; shift 2 ;;
+        --fastq_r2)   FASTQ_R2_FILES="$2"; shift 2 ;;
+        --target_bed) TARGET_BED_NAME="$2"; shift 2 ;;
+        --extra_args) EXTRA_NF_ARGS="$2";  shift 2 ;;
         *)
             log_error "Unknown argument: $1"
             exit 1
@@ -115,8 +110,8 @@ log_info "  Panel: Twist UCL_SingleGeneNIPT_TE-96276661 (hg38)"
 log_info "============================================================"
 log_info "Order ID       : ${ORDER_ID}"
 log_info "Sample Names   : ${SAMPLE_NAMES}"
-log_info "Variant Caller : ${VARIANT_CALLER}"
-log_info "FF Caller      : ${FF_VARIANT_CALLER}"
+log_info "Variant Caller : bcftools (fixed)"
+log_info "Aligner        : bwa-mem2 (fixed)"
 log_info "Timestamp      : ${TIMESTAMP}"
 log_info "============================================================"
 
@@ -126,32 +121,27 @@ update_progress "INIT" "Pipeline starting for order ${ORDER_ID}"
 log_info "Detecting reference files in ${DATA_DIR} ..."
 update_progress "INIT" "Detecting reference files"
 
-# Reference FASTA (use ls/glob: find can fail on Docker bind mounts)
-REF_FASTA=""
-for f in "${DATA_DIR}/reference"/*.fasta "${DATA_DIR}/reference"/*.fa; do
-    [[ -f "$f" ]] && REF_FASTA="$f" && break
-done
-if [[ -z "$REF_FASTA" ]]; then
-    log_error "No reference FASTA found in ${DATA_DIR}/reference/"
-    update_progress "ERROR" "No reference FASTA found"
+# Reference FASTA — shared path (matches nextflow.config reference_fasta)
+REF_FASTA="/data/reference/genomes/GRCh38/GRCh38.fasta"
+if [[ ! -f "$REF_FASTA" ]]; then
+    log_error "Reference FASTA not found: ${REF_FASTA}"
+    update_progress "ERROR" "Reference FASTA not found"
     exit 1
+fi
+if [[ ! -f "${REF_FASTA}.fai" ]]; then
+    log_warn "Reference .fai not found. Creating with samtools..."
+    samtools faidx "${REF_FASTA}"
 fi
 log_info "Reference FASTA: ${REF_FASTA}"
 
-# Check .fai index
-if [[ ! -f "${REF_FASTA}.fai" ]]; then
-    log_warn "Reference .fai index not found. Creating with samtools..."
-    samtools faidx "${REF_FASTA}"
-fi
-
-# BWA-MEM2 index directory
-BWA_INDEX_DIR="${DATA_DIR}/bwa_index"
-if [[ ! -d "$BWA_INDEX_DIR" ]]; then
-    log_error "BWA-MEM2 index directory not found: ${BWA_INDEX_DIR}"
+# BWA-MEM2 index directory (shared path, matches nextflow.config bwa_mem2_index_dir)
+BWA_MEM2_INDEX_DIR="/data/reference/genomes/GRCh38/bwa_mem2_index"
+if [[ ! -d "$BWA_MEM2_INDEX_DIR" ]]; then
+    log_error "BWA-MEM2 index not found: ${BWA_MEM2_INDEX_DIR}"
     update_progress "ERROR" "BWA-MEM2 index not found"
     exit 1
 fi
-log_info "BWA Index Dir  : ${BWA_INDEX_DIR}"
+log_info "BWA-MEM2 Index : ${BWA_MEM2_INDEX_DIR}"
 
 # ── Detect BED files (Twist panel-specific) ──────────────────────────────────
 log_info "Detecting Twist panel BED files in ${DATA_DIR}/target_bed/ ..."
@@ -314,10 +304,17 @@ NF_LOG="${ORDER_LOG_DIR}/nextflow_${TIMESTAMP}.log"
 # Run from ANALYSIS_DIR so .nextflow/ is writable (pipeline dir is root-owned in image)
 cd "${ANALYSIS_DIR}"
 
+# -resume: disabled when host passes SGNIPT_NO_RESUME=1 (e.g. run_sgnipt.sh --fresh); see carrier_screening --fresh
+NF_RESUME="-resume"
+if [[ "${SGNIPT_NO_RESUME:-0}" == "1" ]] || [[ "${SGNIPT_NO_RESUME:-}" == "true" ]]; then
+    NF_RESUME=""
+    log_info "Nextflow resume: disabled (SGNIPT_NO_RESUME; fresh run)"
+fi
+
 # Build the Nextflow command
 NF_CMD="nextflow run ${PIPELINE_DIR}/main.nf \
     -profile docker_internal \
-    -resume \
+    ${NF_RESUME} \
     ${NF_PARAMS_FILE} \
     --input ${SAMPLESHEET} \
     --target_bed ${TARGET_BED} \
@@ -326,10 +323,7 @@ NF_CMD="nextflow run ${PIPELINE_DIR}/main.nf \
     ${ZERO_PROBE_ARG} \
     ${GENE_LIST_ARG} \
     --reference_fasta ${REF_FASTA} \
-    --bwa_index_dir ${BWA_INDEX_DIR} \
     --outdir ${ORDER_OUTPUT_DIR} \
-    --variant_caller ${VARIANT_CALLER} \
-    --ff_variant_caller ${FF_VARIANT_CALLER} \
     ${QC_THRESHOLDS_ARG} \
     ${ANNOTATION_ARGS} \
     ${EXTRA_NF_ARGS} \

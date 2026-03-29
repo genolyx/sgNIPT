@@ -24,6 +24,7 @@ process COLLECT_FRAGMENT_SIZES {
 
     script:
     """
+    export HOME=\$PWD
     python3 ${projectDir}/scripts/collect_fragment_sizes.py \\
         --bam ${bam} \\
         --sample-id ${sample_id} \\
@@ -154,6 +155,7 @@ process ESTIMATE_FETAL_FRACTION {
     def config_arg = params.ff_config ? "--config ${params.ff_config}" : ""
 
     """
+    export HOME=\$PWD
     python3 ${projectDir}/scripts/fetal_fraction.py \\
         --sample-id ${sample_id} \\
         --vcf ${ff_vcf} \\

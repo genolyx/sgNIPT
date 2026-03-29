@@ -46,6 +46,113 @@ def load_json(path: str) -> Optional[Dict[str, Any]]:
         return json.load(fh)
 
 
+def parse_vep_vcf(vcf_path: str) -> Dict[str, Dict[str, Any]]:
+    """
+    Parse a VEP-annotated VCF (bgzipped or plain) and return a lookup dict
+    keyed by "CHROM:POS:REF:ALT" → {csq, clnsig, clndn, fetal_origin, fetal_gt, fetal_conf}.
+
+    Reads the ##INFO=<ID=CSQ,...> header to determine field order.
+    Extracts ClinVar fields from INFO/ClinVar_CLNSIG and INFO/ClinVar_CLNDN
+    (added by VEP --custom ClinVar,...,CLNSIG,CLNDN).
+    """
+    if not vcf_path or not Path(vcf_path).exists():
+        return {}
+
+    logger.info("Parsing VEP-annotated fetal VCF: %s", vcf_path)
+
+    csq_fields: List[str] = []
+    annotations: Dict[str, Dict[str, Any]] = {}
+
+    opener = __import__("gzip").open if vcf_path.endswith(".gz") else open
+
+    with opener(vcf_path, "rt") as fh:
+        for line in fh:
+            # Parse CSQ field order from header
+            if line.startswith("##INFO=<ID=CSQ,"):
+                m = __import__("re").search(r"Format: ([^\"]+)", line)
+                if m:
+                    csq_fields = m.group(1).strip().split("|")
+                continue
+            if line.startswith("#"):
+                continue
+
+            cols = line.rstrip("\n").split("\t")
+            if len(cols) < 8:
+                continue
+
+            chrom, pos, _id, ref, alt_str, _qual, _flt, info_str = cols[:8]
+            alt = alt_str.split(",")[0]  # primary alt allele
+            key = f"{chrom}:{pos}:{ref}:{alt}"
+
+            # Parse INFO key=value pairs
+            info: Dict[str, str] = {}
+            for item in info_str.split(";"):
+                if "=" in item:
+                    k, v = item.split("=", 1)
+                    info[k] = v
+                else:
+                    info[item] = "1"
+
+            # Parse first CSQ transcript block
+            csq_data: Dict[str, str] = {}
+            csq_raw = info.get("CSQ", "")
+            if csq_raw and csq_fields:
+                first_block = csq_raw.split(",")[0]
+                vals = first_block.split("|")
+                csq_data = dict(zip(csq_fields, vals + [""] * (len(csq_fields) - len(vals))))
+
+            # ClinVar fields from VEP --custom (prefixed with "ClinVar_")
+            clnsig = info.get("ClinVar_CLNSIG", csq_data.get("ClinVar_CLNSIG", ""))
+            clndn  = info.get("ClinVar_CLNDN",  csq_data.get("ClinVar_CLNDN", ""))
+            clnrev = info.get("ClinVar_CLNREVSTAT", "")
+            clnhgvs = info.get("ClinVar_CLNHGVS", "")
+
+            annotations[key] = {
+                "hgvsc":      csq_data.get("HGVSc", ""),
+                "hgvsp":      csq_data.get("HGVSp", ""),
+                "consequence":csq_data.get("Consequence", ""),
+                "impact":     csq_data.get("IMPACT", ""),
+                "symbol":     csq_data.get("SYMBOL", ""),
+                "gene_id":    csq_data.get("Gene", ""),
+                "sift":       csq_data.get("SIFT", ""),
+                "polyphen":   csq_data.get("PolyPhen", ""),
+                "gnomad_af":  csq_data.get("gnomADe_AF", "") or csq_data.get("AF", ""),
+                "existing":   csq_data.get("Existing_variation", ""),
+                "mane":       csq_data.get("MANE_SELECT", ""),
+                "clinvar": {
+                    "clnsig":     clnsig,
+                    "clndn":      clndn,
+                    "clnrevstat": clnrev,
+                    "clnhgvs":    clnhgvs,
+                },
+                "fetal_origin": info.get("FETAL_ORIGIN", ""),
+                "fetal_gt":     info.get("FETAL_GT", ""),
+                "fetal_conf":   info.get("FETAL_CONF", ""),
+            }
+
+    logger.info("VEP annotation loaded for %d fetal variants", len(annotations))
+    return annotations
+
+
+def merge_vep_into_report(report: Dict[str, Any], vep_annotations: Dict[str, Dict[str, Any]]) -> None:
+    """
+    Merge VEP + ClinVar annotation into variant_analysis.clinical_findings in-place.
+    Keyed by CHROM:POS:REF:ALT.
+    """
+    if not vep_annotations:
+        return
+    va = report.get("variant_analysis") or {}
+    findings = va.get("clinical_findings") or []
+    merged = 0
+    for finding in findings:
+        key = f"{finding.get('chrom')}:{finding.get('pos')}:{finding.get('ref')}:{finding.get('alt')}"
+        ann = vep_annotations.get(key)
+        if ann:
+            finding["vep"] = ann
+            merged += 1
+    logger.info("Merged VEP annotation into %d/%d clinical findings", merged, len(findings))
+
+
 def aggregate_results(
     sample_id: str,
     fastq_qc_json: Optional[str],
@@ -53,6 +160,7 @@ def aggregate_results(
     fetal_fraction_json: Optional[str],
     variant_report_json: Optional[str],
     multiqc_data_json: Optional[str],
+    annotated_vcf: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Aggregate all pipeline results into a single report."""
     logger.info("Aggregating results for sample: %s", sample_id)
@@ -112,6 +220,14 @@ def aggregate_results(
         data = load_json(variant_report_json)
         if data:
             report["variant_analysis"] = data
+
+    # Merge VEP + ClinVar annotation from annotated fetal VCF
+    if annotated_vcf and Path(annotated_vcf).exists():
+        vep_annotations = parse_vep_vcf(annotated_vcf)
+        merge_vep_into_report(report, vep_annotations)
+        report["report_metadata"]["vep_annotated"] = True
+    else:
+        report["report_metadata"]["vep_annotated"] = False
 
     # Final status determination
     if report["overall_status"] == "FAIL":
@@ -698,6 +814,13 @@ def main():
     parser.add_argument("--output_dir", required=True, help="Output directory")
     parser.add_argument("--output_prefix", help="Output file prefix (default: sample_id)")
 
+    # VEP-annotated fetal VCF (output of VEP_ANNOTATION on fetal_variants.vcf)
+    parser.add_argument(
+        "--annotated_vcf",
+        default=None,
+        help="VEP+ClinVar annotated fetal VCF (.vcf.gz); merged into clinical_findings.",
+    )
+
     # PPTX template options (for daemon-triggered report generation)
     parser.add_argument("--template_dir", help="PPTX template directory")
     parser.add_argument("--report_json", help="Pre-built report JSON for PPTX generation")
@@ -727,6 +850,7 @@ def main():
         fetal_fraction_json=args.fetal_fraction,
         variant_report_json=args.variant_report,
         multiqc_data_json=args.multiqc_data,
+        annotated_vcf=args.annotated_vcf,
     )
 
     # Write JSON report

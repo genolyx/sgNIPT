@@ -279,6 +279,20 @@ def load_target_bed(bed_path: str) -> List[Dict[str, Any]]:
     return targets
 
 
+def load_vcf_header(vcf_path: str) -> Tuple[List[str], str]:
+    """Return (meta_lines, column_header_line) from a VCF without reading all records."""
+    meta_lines: List[str] = []
+    col_header = ""
+    with open(vcf_path, "r") as fh:
+        for line in fh:
+            if line.startswith("##"):
+                meta_lines.append(line.rstrip("\n"))
+            elif line.startswith("#CHROM"):
+                col_header = line.rstrip("\n")
+                break
+    return meta_lines, col_header
+
+
 def parse_vcf_variants(vcf_path: str, config: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Parse VCF file and extract variant information with allele depths."""
     logger.info("Parsing VCF for variant analysis: %s", vcf_path)
@@ -293,6 +307,7 @@ def parse_vcf_variants(vcf_path: str, config: Dict[str, Any]) -> List[Dict[str, 
                 header_fields = line.strip().split("\t")
                 continue
 
+            raw_line = line.rstrip("\n")
             fields = line.strip().split("\t")
             if len(fields) < 10:
                 continue
@@ -369,6 +384,8 @@ def parse_vcf_variants(vcf_path: str, config: Dict[str, Any]) -> List[Dict[str, 
                     "depth": dp,
                     "ref_count": ref_count,
                     "alt_count": alt_count,
+                    "_raw_vcf_line": raw_line,
+                    "_raw_info": info,
                     "vaf": round(vaf, 6),
                     "info": info_dict,
                 }
@@ -554,6 +571,77 @@ def annotate_with_targets(
     return variants
 
 
+_FETAL_ORIGINS_TO_INCLUDE = {"fetal_specific", "maternal", "maternal_het"}
+_FETAL_GT_EXCLUDE = {"likely_ref"}
+
+
+def write_fetal_vcf(
+    output_path: str,
+    variants: List[Dict[str, Any]],
+    meta_lines: List[str],
+    col_header: str,
+) -> int:
+    """
+    Write a VCF containing only fetal-relevant in-target variants.
+
+    Inclusion criteria (after VARIANT_ANALYSIS classification):
+    - in_target = True
+    - origin in {fetal_specific, maternal, maternal_het}
+    - fetal_genotype_prediction NOT in {likely_ref}  (these are variants the fetus didn't inherit)
+    - origin not in {noise, ambiguous}
+
+    Adds three INFO tags to each record:
+    FETAL_ORIGIN=<origin>
+    FETAL_GT=<fetal_genotype_prediction>
+    FETAL_CONF=<high|medium|low>
+    """
+    fetal_info_defs = [
+        '##INFO=<ID=FETAL_ORIGIN,Number=1,Type=String,Description="Variant origin classification (fetal_specific/maternal/maternal_het/ambiguous)">',
+        '##INFO=<ID=FETAL_GT,Number=1,Type=String,Description="Predicted fetal genotype (het/at_least_het/likely_het/uncertain/likely_ref/unknown)">',
+        '##INFO=<ID=FETAL_CONF,Number=1,Type=String,Description="Classification confidence (high/medium/low)">',
+    ]
+
+    kept = 0
+    with open(output_path, "w") as out:
+        for line in meta_lines:
+            out.write(line + "\n")
+        for defn in fetal_info_defs:
+            out.write(defn + "\n")
+        out.write(col_header + "\n")
+
+        for var in variants:
+            if not var.get("in_target"):
+                continue
+            cls = var.get("classification", {})
+            origin = cls.get("origin", "unknown")
+            fetal_gt = cls.get("fetal_genotype_prediction", "unknown")
+            if origin not in _FETAL_ORIGINS_TO_INCLUDE:
+                continue
+            if fetal_gt in _FETAL_GT_EXCLUDE:
+                continue
+
+            raw = var.get("_raw_vcf_line", "")
+            if not raw:
+                continue
+
+            # Append FETAL_* tags to the INFO column (field index 7)
+            cols = raw.split("\t")
+            if len(cols) < 8:
+                continue
+            existing_info = cols[7]
+            fetal_tags = (
+                f"FETAL_ORIGIN={origin};"
+                f"FETAL_GT={fetal_gt};"
+                f"FETAL_CONF={cls.get('confidence', 'low')}"
+            )
+            cols[7] = (existing_info + ";" + fetal_tags) if existing_info and existing_info != "." else fetal_tags
+            out.write("\t".join(cols) + "\n")
+            kept += 1
+
+    logger.info("Fetal VCF: %d variants written to %s", kept, output_path)
+    return kept
+
+
 def generate_variant_report(
     variants: List[Dict[str, Any]],
     fetal_fraction: float,
@@ -713,9 +801,17 @@ def main():
     )
     parser.add_argument("--config", default=None, help="JSON configuration file.")
     parser.add_argument("--output", required=True, help="Output JSON report file.")
+    parser.add_argument(
+        "--output-vcf",
+        default=None,
+        help="Output VCF containing only fetal-relevant variants (for downstream VEP/ClinVar annotation).",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
+
+    # Load VCF header (needed for fetal VCF output)
+    meta_lines, col_header = load_vcf_header(args.vcf)
 
     # Load targets
     targets = load_target_bed(args.target_bed)
@@ -766,12 +862,17 @@ def main():
         zero_probe_stats=zero_probe_stats,
     )
 
-    # Write output
+    # Write JSON report
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w") as fh:
         json.dump(report, fh, indent=2)
     logger.info("Variant analysis report written to %s", output_path)
+
+    # Write fetal VCF (for VEP + ClinVar annotation)
+    if args.output_vcf:
+        fetal_count = write_fetal_vcf(args.output_vcf, variants, meta_lines, col_header)
+        logger.info("Fetal variant VCF: %d variants → %s", fetal_count, args.output_vcf)
 
     # Summary to stdout
     summary = report["summary"]

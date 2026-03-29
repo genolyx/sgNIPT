@@ -7,6 +7,12 @@
  *  - Uses All_target_regions BED for variant calling
  *  - Zero-probe region flagging for 29 uncovered target regions
  *  - Gene list validation against singleGene_NIPT gene list
+ *
+ *  Caller: bcftools mpileup + call (fixed)
+ *    cfDNA NIPT requires detection of fetal-specific variants at VAF ≈ FF/2
+ *    (typically 3–10%). Germline callers (GATK HC, DeepVariant, Strelka2)
+ *    treat sub-20% VAF as noise and filter them out. bcftools reports allele
+ *    counts without diploid genotype assumptions, preserving the fetal signal.
  * ============================================================================
  */
 
@@ -26,86 +32,24 @@ process VARIANT_CALL_TARGET {
     tuple val(sample_id), path("${sample_id}.target_variants.vcf.gz.tbi"), emit: target_vcf_idx
 
     script:
-    if (params.variant_caller == 'freebayes')
-        """
-        freebayes \\
-            -f ${reference_fasta} \\
-            -t ${target_bed} \\
-            --min-mapping-quality ${params.min_mapping_quality} \\
-            --min-base-quality ${params.min_base_quality} \\
-            --min-alternate-fraction ${params.vc_min_alt_fraction} \\
-            --min-alternate-count ${params.vc_min_alt_count} \\
-            --pooled-continuous \\
-            ${bam} \\
-        | bcftools sort \\
-            -Oz \\
-            -o ${sample_id}.target_variants.vcf.gz
+    """
+    bcftools mpileup \\
+        -f ${reference_fasta} \\
+        -R ${target_bed} \\
+        -q ${params.min_mapping_quality} \\
+        -Q ${params.min_base_quality} \\
+        -d ${params.mpileup_max_depth} \\
+        -a FORMAT/AD,FORMAT/DP,FORMAT/SP,FORMAT/ADF,FORMAT/ADR \\
+        ${bam} \\
+    | bcftools call \\
+        -m \\
+        -v \\
+        --ploidy 2 \\
+        -Oz \\
+        -o ${sample_id}.target_variants.vcf.gz
 
-        bcftools index -t ${sample_id}.target_variants.vcf.gz
-        """
-    else if (params.variant_caller == 'mutect2')
-        """
-        gatk Mutect2 \\
-            -R ${reference_fasta} \\
-            -I ${bam} \\
-            -L ${target_bed} \\
-            --min-base-quality-score ${params.min_base_quality} \\
-            --callable-depth ${params.vc_min_depth} \\
-            -O ${sample_id}.target_variants.raw.vcf.gz
-
-        gatk FilterMutectCalls \\
-            -R ${reference_fasta} \\
-            -V ${sample_id}.target_variants.raw.vcf.gz \\
-            -O ${sample_id}.target_variants.vcf.gz
-
-        bcftools index -t ${sample_id}.target_variants.vcf.gz
-        """
-    else if (params.variant_caller == 'gatk')
-        """
-        # carrier-screening CALL_VARIANTS parity: HaplotypeCaller + VariantFiltration (germline WES)
-        gatk HaplotypeCaller \\
-            -R ${reference_fasta} \\
-            -I ${bam} \\
-            -L ${target_bed} \\
-            --interval-padding 100 \\
-            -O ${sample_id}.hc_raw.vcf.gz \\
-            -ERC NONE \\
-            --create-output-variant-index true
-
-        gatk VariantFiltration \\
-            -R ${reference_fasta} \\
-            -V ${sample_id}.hc_raw.vcf.gz \\
-            -O ${sample_id}.target_variants.vcf.gz \\
-            --filter-expression "QD < 1.5" --filter-name "QD1.5" \\
-            --filter-expression "QUAL < 30.0" --filter-name "QUAL30" \\
-            --filter-expression "SOR > 4.0" --filter-name "SOR4" \\
-            --filter-expression "FS > 80.0" --filter-name "FS80" \\
-            --filter-expression "MQ < 30.0" --filter-name "MQ30" \\
-            --filter-expression "MQRankSum < -12.5" --filter-name "MQRankSum-12.5" \\
-            --filter-expression "ReadPosRankSum < -8.0" --filter-name "ReadPosRankSum-8"
-
-        bcftools index -t ${sample_id}.target_variants.vcf.gz
-        """
-    else
-        """
-        # Default: bcftools mpileup + call
-        bcftools mpileup \\
-            -f ${reference_fasta} \\
-            -R ${target_bed} \\
-            -q ${params.min_mapping_quality} \\
-            -Q ${params.min_base_quality} \\
-            -d ${params.mpileup_max_depth} \\
-            -a FORMAT/AD,FORMAT/DP,FORMAT/SP,FORMAT/ADF,FORMAT/ADR \\
-            ${bam} \\
-        | bcftools call \\
-            -m \\
-            -v \\
-            --ploidy 2 \\
-            -Oz \\
-            -o ${sample_id}.target_variants.vcf.gz
-
-        bcftools index -t ${sample_id}.target_variants.vcf.gz
-        """
+    bcftools index -t ${sample_id}.target_variants.vcf.gz
+    """
 }
 
 process FILTER_VARIANTS {
@@ -132,42 +76,6 @@ process FILTER_VARIANTS {
     """
 }
 
-process ANNOTATE_VARIANTS {
-    tag "${sample_id}"
-    label 'process_low'
-    publishDir "${params.outdir}/${sample_id}/variants", mode: 'copy'
-
-    when:
-    params.run_annotation
-
-    input:
-    tuple val(sample_id), path(vcf)
-
-    output:
-    tuple val(sample_id), path("${sample_id}.annotated_variants.vcf"), emit: annotated_vcf
-
-    script:
-    if (params.annotation_tool == 'snpsift' && params.clinvar_vcf)
-        """
-        SnpSift annotate \\
-            ${params.clinvar_vcf} \\
-            ${vcf} \\
-            > ${sample_id}.annotated_variants.vcf
-        """
-    else if (params.annotation_tool == 'bcftools' && params.annotation_db)
-        """
-        bcftools annotate \\
-            -a ${params.annotation_db} \\
-            -c CHROM,POS,REF,ALT,INFO \\
-            ${vcf} \\
-            -o ${sample_id}.annotated_variants.vcf
-        """
-    else
-        """
-        # No annotation database configured; pass through
-        cp ${vcf} ${sample_id}.annotated_variants.vcf
-        """
-}
 
 process VARIANT_ANALYSIS {
     tag "${sample_id}"
@@ -183,6 +91,7 @@ process VARIANT_ANALYSIS {
 
     output:
     tuple val(sample_id), path("${sample_id}.variant_report.json"), emit: variant_report
+    tuple val(sample_id), path("${sample_id}.fetal_variants.vcf"),  emit: fetal_vcf
 
     script:
     def config_arg    = params.variant_analysis_config ? "--config ${params.variant_analysis_config}" : ""
@@ -190,6 +99,7 @@ process VARIANT_ANALYSIS {
     def gene_list_arg = gene_list.name != 'NO_GENE_LIST' ? "--gene-list ${gene_list}" : ""
 
     """
+    export HOME=\$PWD
     # Extract fetal fraction value from JSON (handle None when FF estimation failed)
     FF=\$(python3 -c "import json; d=json.load(open('${ff_json}')); v=d.get('primary_fetal_fraction'); print(v if v is not None else 0.05)")
 
@@ -201,6 +111,7 @@ process VARIANT_ANALYSIS {
         ${zero_arg} \\
         ${gene_list_arg} \\
         ${config_arg} \\
-        --output ${sample_id}.variant_report.json
+        --output ${sample_id}.variant_report.json \\
+        --output-vcf ${sample_id}.fetal_variants.vcf
     """
 }

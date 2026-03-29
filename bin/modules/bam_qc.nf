@@ -114,6 +114,7 @@ process BAM_QC_EVALUATE {
     def zero_arg      = zero_probe_bed.name != 'NO_ZERO_PROBE_BED' ? "--zero-probe-bed ${zero_probe_bed}" : ""
 
     """
+    export HOME=\$PWD
     # Decompress mosdepth regions BED if needed
     if [[ "${mosdepth_regions}" == *.gz ]]; then
         gunzip -c ${mosdepth_regions} > regions_decompressed.bed

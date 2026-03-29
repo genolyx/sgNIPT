@@ -2,6 +2,10 @@
  * ============================================================================
  *  Module: alignment.nf
  *  Description: Read alignment with BWA-MEM2 and BAM post-processing
+ *
+ *  Aligner: BWA-MEM2 (fixed)
+ *    ~2× faster than BWA-MEM with identical mapping accuracy.
+ *    Index: /data/reference/genomes/GRCh38/bwa_mem2_index/
  * ============================================================================
  */
 
@@ -19,17 +23,17 @@ process BWA_MEM2_ALIGN {
     tuple val(sample_id), path("${sample_id}.sorted.bam.bai"), emit: sorted_bai
 
     script:
-    def ref_prefix = bwa_index.find { it.name.endsWith('.fa') || it.name.endsWith('.fasta') || it.name.endsWith('.fa.gz') }?.name?.replaceAll(/\.(fa|fasta)(\.gz)?$/, '') ?: params.genome_prefix
     def rg = "@RG\\tID:${sample_id}\\tSM:${sample_id}\\tPL:ILLUMINA\\tLB:${sample_id}_lib"
-    // BWA uses index prefix from bwa_index_dir; BWA-MEM2 uses reference_fasta path
-    def bwa_idx = "${params.bwa_index_dir}/${file(params.reference_fasta).name}"
-    def align_cmd = params.aligner == 'bwa'
-        ? "bwa mem -t ${task.cpus} -R '${rg}' ${params.bwa_extra_args ?: ''} ${bwa_idx}"
-        : "bwa-mem2 mem -t ${task.cpus} -R '${rg}' ${params.bwa_extra_args ?: ''} ${params.reference_fasta}"
+
+    def bwa_ref = "${params.bwa_mem2_index_dir}/GRCh38.fasta"
 
     if (reads instanceof List && reads.size() == 2)
         """
-        ${align_cmd} \\
+        bwa-mem2 mem \\
+            -t ${task.cpus} \\
+            -R '${rg}' \\
+            ${params.bwa_extra_args ?: ''} \\
+            ${bwa_ref} \\
             ${reads[0]} ${reads[1]} \\
         | samtools sort \\
             -@ ${task.cpus} \\
@@ -41,7 +45,11 @@ process BWA_MEM2_ALIGN {
         """
     else
         """
-        ${align_cmd} \\
+        bwa-mem2 mem \\
+            -t ${task.cpus} \\
+            -R '${rg}' \\
+            ${params.bwa_extra_args ?: ''} \\
+            ${bwa_ref} \\
             ${reads} \\
         | samtools sort \\
             -@ ${task.cpus} \\
