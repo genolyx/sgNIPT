@@ -93,12 +93,14 @@ if [[ -z "$FASTQ_R1_FILES" ]]; then
 fi
 
 # ── Per-sample paths (analysis/output/log mounted as {YYMM}/{ORDER_ID}/) ─────
-#  ANALYSIS_DIR = analysis/2603/ORDER_ID (Nextflow work, intermediates)
-#  ORDER_OUTPUT_DIR = output/2603/ORDER_ID (JSON, PNG for service-daemon)
-#  ORDER_LOG_DIR = log/2603/ORDER_ID (analysis logs)
+#  ANALYSIS_DIR    = analysis/2603/ORDER_ID  (Nextflow publishDir results + work)
+#  NF_OUTDIR       = analysis/2603/ORDER_ID  (carrier_screening style: results alongside work)
+#  ORDER_OUTPUT_DIR = output/2603/ORDER_ID   (daemon JSON + TAR only)
+#  ORDER_LOG_DIR   = log/2603/ORDER_ID       (analysis logs)
 ORDER_OUTPUT_DIR="${OUTPUT_DIR}/${ORDER_ID}"
 ORDER_LOG_DIR="${LOG_DIR}/${ORDER_ID}"
 WORK_DIR="${ANALYSIS_DIR}/work"
+NF_OUTDIR="${ANALYSIS_DIR}"
 ENTRYPOINT_LOG="${ORDER_LOG_DIR}/entrypoint.log"
 
 # NXF_TEMP is set to analysis/tmp; must exist for Nextflow mktemp
@@ -149,6 +151,10 @@ update_progress "INIT" "Detecting Twist panel BED files"
 
 BED_DIR="${DATA_DIR}/target_bed"
 
+# diagnostic: show what Docker mounted under DATA_DIR
+log_info "Contents of ${BED_DIR}/ :"
+ls -la "${BED_DIR}/" 2>&1 | while IFS= read -r line; do log_info "  $line"; done || log_warn "  (cannot list ${BED_DIR}/)"
+
 # 1. Target BED (All_target_regions) — primary target for variant calling & QC
 # Use glob (find can fail on Docker bind mounts)
 if [[ -n "$TARGET_BED_NAME" ]]; then
@@ -158,6 +164,16 @@ else
     for f in "${BED_DIR}"/All_target_regions*.bed; do
         [[ -f "$f" ]] && TARGET_BED="$f" && break
     done
+    # also try the real directory if target_bed is a symlink (data/target_bed -> bed)
+    if [[ -z "$TARGET_BED" ]]; then
+        REAL_BED_DIR="$(readlink -f "${BED_DIR}" 2>/dev/null || echo "${DATA_DIR}/bed")"
+        if [[ "$REAL_BED_DIR" != "$BED_DIR" ]] && [[ -d "$REAL_BED_DIR" ]]; then
+            log_info "  Trying resolved path: ${REAL_BED_DIR}/"
+            for f in "${REAL_BED_DIR}"/All_target_regions*.bed; do
+                [[ -f "$f" ]] && TARGET_BED="$f" && break
+            done
+        fi
+    fi
     if [[ -z "$TARGET_BED" ]]; then
         for f in "${BED_DIR}"/*.bed; do
             [[ -f "$f" ]] || continue
@@ -172,6 +188,8 @@ else
 fi
 if [[ -z "$TARGET_BED" ]] || [[ ! -f "$TARGET_BED" ]]; then
     log_error "Target BED file not found in ${BED_DIR}/"
+    log_info "  DATA_DIR mount contents:"
+    ls -la "${DATA_DIR}/" 2>&1 | while IFS= read -r line; do log_info "  $line"; done || true
     update_progress "ERROR" "Target BED file not found"
     exit 1
 fi
@@ -323,7 +341,7 @@ NF_CMD="nextflow run ${PIPELINE_DIR}/main.nf \
     ${ZERO_PROBE_ARG} \
     ${GENE_LIST_ARG} \
     --reference_fasta ${REF_FASTA} \
-    --outdir ${ORDER_OUTPUT_DIR} \
+    --outdir ${NF_OUTDIR} \
     ${QC_THRESHOLDS_ARG} \
     ${ANNOTATION_ARGS} \
     ${EXTRA_NF_ARGS} \

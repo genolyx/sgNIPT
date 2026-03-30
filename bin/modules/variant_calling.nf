@@ -45,6 +45,8 @@ process VARIANT_CALL_TARGET {
         -m \\
         -v \\
         --ploidy 2 \\
+        -Ou \\
+    | bcftools sort \\
         -Oz \\
         -o ${sample_id}.target_variants.vcf.gz
 

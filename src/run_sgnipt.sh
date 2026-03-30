@@ -5,10 +5,12 @@
 #  This script is called by nipt-daemon (or manually) to launch a single
 #  Order analysis inside a Docker container.
 #
-#  Designed to be compatible with the nipt-daemon runner.py pattern:
-#    - Container name = ORDER_ID (daemon uses docker ps -f name=ORDER_ID)
-#    - Output path follows YYMM work_dir pattern
-#    - daemon polls for {ORDER_ID}.json + {ORDER_ID}.output.tar
+#  service-daemon / carrier_screening parity (default):
+#    - Foreground ``docker run`` (no -d): the shell blocks until the pipeline exits, like
+#      carrier_screening/src/run_analysis.sh — subprocess exit code == pipeline exit code.
+#    - docker ps NAMES = --order_id (docker run --name <order_id>; label sgnipt.order_id)
+#    - Output path follows YYMM work_dir pattern; results: {ORDER_ID}.json, .output.tar
+#  Legacy: pass --detached for ``docker run -d`` + background permission repair (fire-and-forget).
 #
 #  Usage (minimal — FASTQ under fastq/{work_dir}/{order_id}/):
 #    export SGNIPT_ROOT_DIR=/path/to/sgNIPT
@@ -24,7 +26,7 @@
 #        [--ref_dir ./data/refs]                # logged only; data mount unchanged \
 #        [--target_bed panel_v1.bed] \
 #        [--fresh]                            # remove analysis/<YYMM>/<id>/work + .nextflow, no Nextflow -resume
-#        [--detached]
+#        [--detached]                         # docker -d (only if you need non-blocking start)
 #
 #  Directory structure: {type}/{YYMM}/{SAMPLE}/
 #    fastq/2603/NA12878_Twist_Exome/   - input FASTQ
@@ -67,9 +69,13 @@ CLEANUP_WORK="${SGNIPT_CLEANUP_WORK:-false}"
 CHOWN_SPEC="${CHOWN_SPEC:-$(id -u):$(id -g)}"
 
 # ── Host directory paths (derived from ROOT_DIR) ─────────────────────────────
-HOST_FASTQ_DIR="${SGNIPT_ROOT_DIR}/fastq"
-HOST_DATA_DIR="${SGNIPT_ROOT_DIR}/data"
-HOST_CONFIG_DIR="${SGNIPT_ROOT_DIR}/config"
+HOST_FASTQ_DIR="${SGNIPT_FASTQ_DIR:-${SGNIPT_ROOT_DIR}/fastq}"
+# data/config: allow override so daemon (running in a container) can pass the
+# real HOST-visible path for docker -v, which must be a HOST path not a
+# container-internal bind-mount path.  Set SGNIPT_DATA_DIR / SGNIPT_CONFIG_DIR
+# to the layout host path (e.g. /home/ken/sgNIPT/data) in .env.docker.
+HOST_DATA_DIR="${SGNIPT_DATA_DIR:-${SGNIPT_ROOT_DIR}/data}"
+HOST_CONFIG_DIR="${SGNIPT_CONFIG_DIR:-${SGNIPT_ROOT_DIR}/config}"
 HOST_ANALYSIS_DIR="${SGNIPT_ROOT_DIR}/analysis"
 HOST_OUTPUT_DIR="${SGNIPT_ROOT_DIR}/output"
 HOST_LOG_DIR="${SGNIPT_ROOT_DIR}/log"
@@ -191,6 +197,14 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Trim leading/trailing whitespace so docker --name matches `docker ps` / daemon filters
+ORDER_ID="${ORDER_ID#"${ORDER_ID%%[![:space:]]*}"}"
+ORDER_ID="${ORDER_ID%"${ORDER_ID##*[![:space:]]}"}"
+if [[ -n "${SAMPLE_NAMES}" ]]; then
+    SAMPLE_NAMES="${SAMPLE_NAMES#"${SAMPLE_NAMES%%[![:space:]]*}"}"
+    SAMPLE_NAMES="${SAMPLE_NAMES%"${SAMPLE_NAMES##*[![:space:]]}"}"
+fi
+
 # ── work_dir: YYMM pattern ───────────────────────────────────────────────────
 #  Structure: fastq|analysis|output|log / {YYMM} / {SAMPLE_NAME}/
 #  Priority: --work_dir > SGNIPT_WORK_DIR env > current date
@@ -204,6 +218,13 @@ fi
 # ── Validate required arguments ──────────────────────────────────────────────
 if [[ -z "$ORDER_ID" ]]; then
     echo "[ERROR] --order_id is required"
+    exit 1
+fi
+
+# Docker container NAME must be order_id so `docker ps -a` and nipt-daemon (`docker ps -f name=<order_id>`) work.
+if [[ ! "${ORDER_ID}" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
+    echo "[ERROR] --order_id must be a valid Docker container name: [a-zA-Z0-9][a-zA-Z0-9_.-]*"
+    echo "  Got: ${ORDER_ID}"
     exit 1
 fi
 
@@ -351,58 +372,74 @@ echo "============================================================"
 #    output/    → output/2603/ORDER_ID (JSON, PNG for service-daemon)
 #    log/       → log/2603/ORDER_ID (analysis logs)
 
-docker run \
-    --user "${CHOWN_SPEC}" \
-    "${DOCKER_GROUP_ARGS[@]}" \
-    --name "${CONTAINER_NAME}" \
-    -d \
-    -e TZ=Asia/Seoul \
-    -e USER="$(whoami)" \
-    -e USERNAME="$(whoami)" \
-    -e HOME=/tmp \
-    -e FONTCONFIG_PATH=/tmp \
-    -e CLEANUP_WORK_DIR="${CLEANUP_WORK}" \
-    -e SGNIPT_NO_RESUME="${SGNIPT_NO_RESUME}" \
-    -e NXF_HOME="/tmp/.nextflow" \
-    -e NXF_TEMP="/Work/SgNIPT/analysis/tmp" \
-    -e WORK_DIR="${WORK_DIR}" \
-    -e BWA2="bwa-mem2" \
-    -e SAMTOOLS="samtools" \
-    -e BCFTOOLS="bcftools" \
-    -e PYTHON3="python3" \
-    -v "${HOST_FASTQ_DIR}:/Work/SgNIPT/fastq" \
-    -v "${HOST_DATA_DIR}:/Work/SgNIPT/data" \
-    -v "${HOST_CONFIG_DIR}:/Work/SgNIPT/config" \
-    -v "${ORDER_ANALYSIS_HOST}:/Work/SgNIPT/analysis" \
-    -v "${ORDER_OUTPUT_HOST}:/Work/SgNIPT/output/${ORDER_ID}" \
-    -v "${ORDER_LOG_HOST}:/Work/SgNIPT/log/${ORDER_ID}" \
-    -v /data/reference:/data/reference:ro \
-    --cpus "${CONTAINER_CPUS}" \
-    --memory "${CONTAINER_MEMORY}" \
-    "${DOCKER_IMAGE}" \
+#  Default: foreground (carrier_screening run_analysis.sh); optional --detached for -d.
+COMMON_DOCKER_ARGS=(
+    --user "${CHOWN_SPEC}"
+    "${DOCKER_GROUP_ARGS[@]}"
+    --name "${CONTAINER_NAME}"
+    --label "sgnipt.order_id=${ORDER_ID}"
+    -e TZ=Asia/Seoul
+    -e USER="$(whoami)"
+    -e USERNAME="$(whoami)"
+    -e HOME=/tmp
+    -e FONTCONFIG_PATH=/tmp
+    -e CLEANUP_WORK_DIR="${CLEANUP_WORK}"
+    -e SGNIPT_NO_RESUME="${SGNIPT_NO_RESUME}"
+    -e NXF_HOME="/tmp/.nextflow"
+    -e NXF_TEMP="/Work/SgNIPT/analysis/tmp"
+    -e WORK_DIR="${WORK_DIR}"
+    -e BWA2="bwa-mem2"
+    -e SAMTOOLS="samtools"
+    -e BCFTOOLS="bcftools"
+    -e PYTHON3="python3"
+    -v "${HOST_FASTQ_DIR}:/Work/SgNIPT/fastq"
+    -v "${HOST_DATA_DIR}:/Work/SgNIPT/data"
+    -v "${HOST_CONFIG_DIR}:/Work/SgNIPT/config"
+    -v "${ORDER_ANALYSIS_HOST}:/Work/SgNIPT/analysis"
+    -v "${ORDER_OUTPUT_HOST}:/Work/SgNIPT/output/${ORDER_ID}"
+    -v "${ORDER_LOG_HOST}:/Work/SgNIPT/log/${ORDER_ID}"
+    -v /data/reference:/data/reference:ro
+    --cpus "${CONTAINER_CPUS}"
+    --memory "${CONTAINER_MEMORY}"
+    "${DOCKER_IMAGE}"
     "${ENTRYPOINT_ARGS[@]}"
+)
 
-DOCKER_EXIT=$?
-
-if [[ $DOCKER_EXIT -eq 0 ]]; then
-    echo "[INFO] Container '${CONTAINER_NAME}' started successfully (detached)"
-    echo "[INFO] Monitor logs     : docker logs -f ${CONTAINER_NAME}"
-    echo "[INFO] Analysis dir    : ${ORDER_ANALYSIS_HOST}"
-    echo "[INFO] Output dir      : ${ORDER_OUTPUT_HOST}"
-    echo "[INFO] Log dir         : ${ORDER_LOG_HOST}"
-    echo "[INFO] Service-daemon  : ${ORDER_OUTPUT_HOST}/${ORDER_ID}.json"
-    echo "[INFO]                    ${ORDER_OUTPUT_HOST}/${ORDER_ID}.output.tar"
-
-    # 1-E: Repair permissions after the container finishes.
-    # The container runs detached, so we spawn a background watcher that calls repair
-    # once the container exits (success or failure). This ensures the group can always
-    # read/add to the output tree regardless of which uid Docker wrote files as.
-    (
-        docker wait "${CONTAINER_NAME}" >/dev/null 2>&1 || true
-        repair_order_tree_permissions || true
-    ) &
-    disown $!
+set +e
+if [[ "${DETACHED}" == "true" ]]; then
+    docker run -d "${COMMON_DOCKER_ARGS[@]}"
 else
-    echo "[ERROR] Failed to start container '${CONTAINER_NAME}' (exit: ${DOCKER_EXIT})"
-    exit $DOCKER_EXIT
+    docker run "${COMMON_DOCKER_ARGS[@]}"
+fi
+DOCKER_EXIT=$?
+set -e
+
+if [[ "${DETACHED}" == "true" ]]; then
+    if [[ $DOCKER_EXIT -eq 0 ]]; then
+        echo "[INFO] Container '${CONTAINER_NAME}' started successfully (detached)"
+        echo "[INFO] Monitor logs     : docker logs -f ${CONTAINER_NAME}"
+        echo "[INFO] Analysis dir    : ${ORDER_ANALYSIS_HOST}"
+        echo "[INFO] Output dir      : ${ORDER_OUTPUT_HOST}"
+        echo "[INFO] Log dir         : ${ORDER_LOG_HOST}"
+        echo "[INFO] Service-daemon  : ${ORDER_OUTPUT_HOST}/${ORDER_ID}.json"
+        echo "[INFO]                    ${ORDER_OUTPUT_HOST}/${ORDER_ID}.output.tar"
+        (
+            docker wait "${CONTAINER_NAME}" >/dev/null 2>&1 || true
+            repair_order_tree_permissions || true
+        ) &
+        disown $!
+        exit 0
+    else
+        echo "[ERROR] Failed to start container '${CONTAINER_NAME}' (exit: ${DOCKER_EXIT})"
+        exit $DOCKER_EXIT
+    fi
+else
+    repair_order_tree_permissions || true
+    if [[ $DOCKER_EXIT -eq 0 ]]; then
+        echo "[INFO] Pipeline completed (exit 0)"
+        echo "[INFO] Output: ${ORDER_OUTPUT_HOST}/${ORDER_ID}.json"
+    else
+        echo "[ERROR] Pipeline failed with exit code: ${DOCKER_EXIT}"
+    fi
+    exit "${DOCKER_EXIT}"
 fi

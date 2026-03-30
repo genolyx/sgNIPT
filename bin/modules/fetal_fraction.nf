@@ -129,6 +129,8 @@ process VARIANT_CALL_FOR_FF {
             -m \\
             -v \\
             --ploidy 2 \\
+            -Ou \\
+        | bcftools sort \\
             -Ov \\
         | bcftools view \\
             -v snps \\
