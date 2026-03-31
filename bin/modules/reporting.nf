@@ -8,7 +8,7 @@
 process GENERATE_REPORT {
     tag "${sample_id}"
     label 'process_low'
-    publishDir "${params.outdir}/${sample_id}/report", mode: 'copy'
+    publishDir "${params.outdir}/summary", mode: 'copy'
 
     input:
     tuple val(sample_id), path(fastq_qc_json)

@@ -390,13 +390,34 @@ if [[ $NF_EXIT_CODE -eq 0 ]]; then
 
     # ── Generate daemon-compatible result JSON ───────────────────────────
     # This is the file that nipt-daemon monitors: {ORDER_ID}.json
+    # Per-sample JSON/HTML/VCF are published under Nextflow --outdir (= ANALYSIS_DIR),
+    # not under ORDER_OUTPUT_DIR (daemon folder only gets this JSON + TAR).
     update_progress "RESULTS" "Generating result JSON"
+
+    RESULT_SAMPLE_NAMES="${SAMPLE_NAMES}"
+    if [[ -n "${INPUT_BAM_CSV}" ]] && [[ -f "${INPUT_BAM_CSV}" ]]; then
+        RESULT_SAMPLE_NAMES="$(
+            awk -F',' 'NR > 1 && $1 != "" {
+                gsub(/\r/, "", $1)
+                sub(/^[ \t]+/, "", $1)
+                sub(/[ \t]+$/, "", $1)
+                if (n++) out = out ","
+                out = out $1
+            } END { print out }' "${INPUT_BAM_CSV}"
+        )"
+        if [[ -z "${RESULT_SAMPLE_NAMES}" ]]; then
+            log_warn "Could not read sample_id from BAM samplesheet; using --sample_name"
+            RESULT_SAMPLE_NAMES="${SAMPLE_NAMES}"
+        else
+            log_info "Result JSON: scanning samples from BAM CSV: ${RESULT_SAMPLE_NAMES}"
+        fi
+    fi
 
     RESULT_JSON="${ORDER_OUTPUT_DIR}/${ORDER_ID}.json"
     python3 "${PIPELINE_DIR}/scripts/generate_result_json.py" \
         --order_id "${ORDER_ID}" \
-        --output_dir "${ORDER_OUTPUT_DIR}" \
-        --sample_names "${SAMPLE_NAMES}" \
+        --output_dir "${ANALYSIS_DIR}" \
+        --sample_names "${RESULT_SAMPLE_NAMES}" \
         --pipeline_version "${PIPELINE_VERSION}" \
         --output "${RESULT_JSON}" \
         2>&1 | tee -a "${ORDER_LOG_DIR}/result_json.log"

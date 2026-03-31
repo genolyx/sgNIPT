@@ -12,7 +12,7 @@
 process BWA_MEM2_ALIGN {
     tag "${sample_id}"
     label 'process_high'
-    publishDir "${params.outdir}/${sample_id}/alignment", mode: 'copy', pattern: '*.flagstat'
+    publishDir "${params.outdir}/alignment", mode: 'copy', pattern: '*.flagstat'
 
     input:
     tuple val(sample_id), path(reads)
@@ -64,7 +64,7 @@ process BWA_MEM2_ALIGN {
 process MARK_DUPLICATES {
     tag "${sample_id}"
     label 'process_medium'
-    publishDir "${params.outdir}/${sample_id}/alignment", mode: 'copy'
+    publishDir "${params.outdir}/alignment", mode: 'copy'
 
     input:
     tuple val(sample_id), path(bam)
@@ -118,7 +118,7 @@ process MARK_DUPLICATES {
 process EXTRACT_TARGET_READS {
     tag "${sample_id}"
     label 'process_medium'
-    publishDir "${params.outdir}/${sample_id}/alignment", mode: 'copy'
+    publishDir "${params.outdir}/alignment", mode: 'copy'
 
     input:
     tuple val(sample_id), path(bam)

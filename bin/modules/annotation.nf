@@ -21,7 +21,7 @@
 process VEP_ANNOTATION {
     tag "${sample_id}"
     label 'process_medium'
-    publishDir "${params.outdir}/${sample_id}/variants", mode: 'copy'
+    publishDir "${params.outdir}/variant", mode: 'copy'
 
     // Use the official Ensembl VEP Docker image
     container 'ensemblorg/ensembl-vep:release_111'

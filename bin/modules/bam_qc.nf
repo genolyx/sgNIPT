@@ -13,7 +13,7 @@
 process SAMTOOLS_FLAGSTAT {
     tag "${sample_id}"
     label 'process_low'
-    publishDir "${params.outdir}/${sample_id}/qc", mode: 'copy'
+    publishDir "${params.outdir}/qc", mode: 'copy'
 
     input:
     tuple val(sample_id), path(bam), path(bai)
@@ -30,7 +30,7 @@ process SAMTOOLS_FLAGSTAT {
 process SAMTOOLS_STATS {
     tag "${sample_id}"
     label 'process_low'
-    publishDir "${params.outdir}/${sample_id}/qc", mode: 'copy'
+    publishDir "${params.outdir}/qc", mode: 'copy'
 
     input:
     tuple val(sample_id), path(bam), path(bai)
@@ -47,7 +47,7 @@ process SAMTOOLS_STATS {
 process MOSDEPTH {
     tag "${sample_id}"
     label 'process_medium'
-    publishDir "${params.outdir}/${sample_id}/qc", mode: 'copy'
+    publishDir "${params.outdir}/qc", mode: 'copy'
 
     input:
     tuple val(sample_id), path(bam), path(bai)
@@ -75,7 +75,7 @@ process MOSDEPTH {
 process ON_TARGET_COUNT {
     tag "${sample_id}"
     label 'process_low'
-    publishDir "${params.outdir}/${sample_id}/qc", mode: 'copy'
+    publishDir "${params.outdir}/qc", mode: 'copy'
 
     input:
     tuple val(sample_id), path(bam), path(bai)
@@ -94,7 +94,7 @@ process ON_TARGET_COUNT {
 process BAM_QC_EVALUATE {
     tag "${sample_id}"
     label 'process_low'
-    publishDir "${params.outdir}/${sample_id}/qc", mode: 'copy'
+    publishDir "${params.outdir}/qc", mode: 'copy'
 
     input:
     tuple val(sample_id), path(flagstat)

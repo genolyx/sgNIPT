@@ -13,7 +13,7 @@
 process COLLECT_FRAGMENT_SIZES {
     tag "${sample_id}"
     label 'process_medium'
-    publishDir "${params.outdir}/${sample_id}/fetal_fraction", mode: 'copy'
+    publishDir "${params.outdir}/fetal_fraction", mode: 'copy'
 
     input:
     tuple val(sample_id), path(bam), path(bai)
@@ -38,7 +38,7 @@ process COLLECT_FRAGMENT_SIZES {
 process SAMTOOLS_IDXSTATS {
     tag "${sample_id}"
     label 'process_low'
-    publishDir "${params.outdir}/${sample_id}/fetal_fraction", mode: 'copy'
+    publishDir "${params.outdir}/fetal_fraction", mode: 'copy'
 
     input:
     tuple val(sample_id), path(bam), path(bai)
@@ -55,7 +55,7 @@ process SAMTOOLS_IDXSTATS {
 process MPILEUP_AT_SNPS {
     tag "${sample_id}"
     label 'process_medium'
-    publishDir "${params.outdir}/${sample_id}/fetal_fraction", mode: 'copy'
+    publishDir "${params.outdir}/fetal_fraction", mode: 'copy'
 
     input:
     tuple val(sample_id), path(bam), path(bai)
@@ -82,7 +82,7 @@ process MPILEUP_AT_SNPS {
 process VARIANT_CALL_FOR_FF {
     tag "${sample_id}"
     label 'process_medium'
-    publishDir "${params.outdir}/${sample_id}/fetal_fraction", mode: 'copy'
+    publishDir "${params.outdir}/fetal_fraction", mode: 'copy'
 
     input:
     tuple val(sample_id), path(bam), path(bai)
@@ -141,7 +141,7 @@ process VARIANT_CALL_FOR_FF {
 process ESTIMATE_FETAL_FRACTION {
     tag "${sample_id}"
     label 'process_low'
-    publishDir "${params.outdir}/${sample_id}/fetal_fraction", mode: 'copy'
+    publishDir "${params.outdir}/fetal_fraction", mode: 'copy'
 
     input:
     tuple val(sample_id), path(ff_vcf)

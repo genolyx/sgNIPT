@@ -13,8 +13,9 @@
 #  Legacy: pass --detached for ``docker run -d`` + background permission repair (fire-and-forget).
 #
 #  Usage (minimal — FASTQ under fastq/{work_dir}/{order_id}/):
-#    export SGNIPT_ROOT_DIR=/path/to/sgNIPT
-#    ./run_sgnipt.sh --order_id NA12878_Twist_Exome --work_dir 2603
+#    ./src/run_sgnipt.sh --order-id NA12878_Twist_Exome --work-id 2603
+#    (SGNIPT_ROOT_DIR defaults to the repo root: parent of src/)
+#    Override: export SGNIPT_ROOT_DIR=/other/root   # e.g. Portal/daemon layout
 #
 #  Explicit FASTQ paths (optional if auto-discovery works):
 #    ./run_sgnipt.sh \
@@ -34,8 +35,8 @@
 #    output/2603/NA12878_Twist_Exome/  - JSON, PNG for service-daemon
 #    log/2603/NA12878_Twist_Exome/     - analysis logs
 #
-#  Environment Variables (set by daemon or .env file):
-#    SGNIPT_ROOT_DIR     - Root directory for SgNIPT on host (required)
+#  Environment Variables (set by daemon, .env, or shell):
+#    SGNIPT_ROOT_DIR     - Root directory for SgNIPT on host (default: repo root = dirname of src/)
 #    SGNIPT_DOCKER_IMAGE - Docker image name (default: sgnipt:latest)
 #    SGNIPT_CPUS         - CPU limit for container (default: 16)
 #    SGNIPT_MEMORY       - Memory limit for container (default: 32g)
@@ -59,7 +60,9 @@ if [[ -f "${PROJECT_DIR}/.env" ]]; then
 fi
 
 # ── Configuration with defaults ──────────────────────────────────────────────
-SGNIPT_ROOT_DIR="${SGNIPT_ROOT_DIR:?'SGNIPT_ROOT_DIR must be set'}"
+# Default: clone/layout root (analysis|output|log|fastq|data live under here).
+# Portal/daemon may set SGNIPT_ROOT_DIR=/data/sgnipt_work — that overrides this.
+SGNIPT_ROOT_DIR="${SGNIPT_ROOT_DIR:-${PROJECT_DIR}}"
 DOCKER_IMAGE="${SGNIPT_DOCKER_IMAGE:-sgnipt:latest}"
 CONTAINER_CPUS="${SGNIPT_CPUS:-16}"
 CONTAINER_MEMORY="${SGNIPT_MEMORY:-32g}"
@@ -364,6 +367,7 @@ if [[ -n "${REF_DIR}" ]]; then
     echo "  Reference dir  : ${REF_DISPLAY}  (informational; pipeline uses ${HOST_DATA_DIR} → /Work/SgNIPT/data)"
 fi
 echo "  Container Name : ${CONTAINER_NAME}"
+echo "  SGNIPT_ROOT    : ${SGNIPT_ROOT_DIR}"
 echo "  Work Dir       : ${WORK_DIR}"
 echo "  Analysis       : ${ORDER_ANALYSIS_HOST}"
 echo "  Output         : ${ORDER_OUTPUT_HOST}"

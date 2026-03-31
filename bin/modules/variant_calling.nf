@@ -19,7 +19,7 @@
 process VARIANT_CALL_TARGET {
     tag "${sample_id}"
     label 'process_medium'
-    publishDir "${params.outdir}/${sample_id}/variants", mode: 'copy'
+    publishDir "${params.outdir}/variant", mode: 'copy'
 
     input:
     tuple val(sample_id), path(bam), path(bai)
@@ -57,7 +57,7 @@ process VARIANT_CALL_TARGET {
 process FILTER_VARIANTS {
     tag "${sample_id}"
     label 'process_low'
-    publishDir "${params.outdir}/${sample_id}/variants", mode: 'copy'
+    publishDir "${params.outdir}/variant", mode: 'copy'
 
     input:
     tuple val(sample_id), path(vcf)
@@ -82,7 +82,7 @@ process FILTER_VARIANTS {
 process VARIANT_ANALYSIS {
     tag "${sample_id}"
     label 'process_low'
-    publishDir "${params.outdir}/${sample_id}/variants", mode: 'copy'
+    publishDir "${params.outdir}/variant", mode: 'copy'
 
     input:
     tuple val(sample_id), path(vcf)

@@ -596,6 +596,13 @@ def generate_from_json(
 # Part 3: HTML Report (standalone, for pipeline output)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _fmt_num(v, default: str = "N/A") -> str:
+    """Format a value as a comma-separated integer, or return default for non-numeric values."""
+    if isinstance(v, (int, float)):
+        return f"{v:,}"
+    return default if v is None else str(v)
+
+
 def generate_html_report(report: Dict[str, Any]) -> str:
     """Generate an HTML report from the aggregated results."""
     sample_id = report["report_metadata"]["sample_id"]
@@ -748,23 +755,24 @@ def generate_html_report(report: Dict[str, Any]) -> str:
         html_parts.append("    </div>\n")
 
     # QC Summary Section
-    fq_data = report.get("fastq_qc")
+    fq_data  = report.get("fastq_qc")
     bam_data = report.get("bam_qc")
-    if fq_data or bam_data:
+    # Only show FASTQ QC if real metrics are present (not a BAM-mode placeholder)
+    fq_metrics = (fq_data or {}).get("metrics") if fq_data else None
+    if fq_metrics or bam_data:
         html_parts.append("""
     <div class="card">
         <h2>Quality Control Summary</h2>
 """)
-        if fq_data:
-            metrics = fq_data.get("metrics", {})
+        if fq_metrics:
             html_parts.append(f"""
         <h3>FASTQ QC</h3>
         <table>
             <tr><th>Metric</th><th>Value</th></tr>
-            <tr><td>Total Reads</td><td>{metrics.get('total_reads_before_filter', 'N/A'):,}</td></tr>
-            <tr><td>Reads After Filter</td><td>{metrics.get('total_reads_after_filter', 'N/A'):,}</td></tr>
-            <tr><td>Q30 Rate</td><td>{metrics.get('q30_rate_after_filter', 'N/A')}</td></tr>
-            <tr><td>GC Content</td><td>{metrics.get('gc_content_after_filter', 'N/A')}</td></tr>
+            <tr><td>Total Reads</td><td>{_fmt_num(fq_metrics.get('total_reads_before_filter'))}</td></tr>
+            <tr><td>Reads After Filter</td><td>{_fmt_num(fq_metrics.get('total_reads_after_filter'))}</td></tr>
+            <tr><td>Q30 Rate</td><td>{fq_metrics.get('q30_rate_after_filter', 'N/A')}</td></tr>
+            <tr><td>GC Content</td><td>{fq_metrics.get('gc_content_after_filter', 'N/A')}</td></tr>
         </table>
 """)
         if bam_data:

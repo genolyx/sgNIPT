@@ -8,7 +8,7 @@
 process FASTP {
     tag "${sample_id}"
     label 'process_medium'
-    publishDir "${params.outdir}/${sample_id}/fastp", mode: 'copy'
+    publishDir "${params.outdir}/qc", mode: 'copy'
 
     input:
     tuple val(sample_id), path(reads)
@@ -53,7 +53,7 @@ process FASTP {
 process FASTQ_QC {
     tag "${sample_id}"
     label 'process_low'
-    publishDir "${params.outdir}/${sample_id}/qc", mode: 'copy'
+    publishDir "${params.outdir}/qc", mode: 'copy'
 
     input:
     tuple val(sample_id), path(fastp_json)
@@ -70,5 +70,31 @@ process FASTQ_QC {
         --sample-id ${sample_id} \\
         ${threshold_arg} \\
         --output ${sample_id}.fastq_qc.json
+    """
+}
+
+// Used only in BAM input mode (--input_bam): generates a placeholder FASTQ QC JSON
+// so that GENERATE_REPORT receives a consistent input tuple even without FASTQ QC data.
+process MOCK_FASTQ_QC {
+    tag "${sample_id}"
+    label 'process_low'
+
+    input:
+    val(sample_id)
+
+    output:
+    tuple val(sample_id), path("${sample_id}.fastq_qc.json"), emit: fastq_qc_json
+
+    script:
+    """
+    python3 -c "
+import json
+json.dump({
+    'sample_id': '${sample_id}',
+    'source': 'bam_input_mode',
+    'note': 'FASTQ QC not available (BAM input mode — alignment skipped)',
+    'qc_passed': None
+}, open('${sample_id}.fastq_qc.json', 'w'), indent=2)
+"
     """
 }

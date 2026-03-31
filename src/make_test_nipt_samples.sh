@@ -78,11 +78,24 @@ done
 # Paths
 # ---------------------------------------------------------------------------
 # Use the target.bam (already extracted to panel regions) from a previous run.
-# This BAM enters the pipeline at Step 5 (BAM QC) via --input_bam mode,
-# bypassing FASTP, alignment, dedup, and extract_target steps.
-SOURCE_BAM="${REPO_ROOT}/output/${WORK_ID}/${SOURCE_ORDER}/${SOURCE_ORDER}/alignment/${SOURCE_ORDER}.target.bam"
+# Published under analysis/<work>/<order>/ (carrier-style flat dirs: alignment/, fetal_fraction/).
+# Legacy nested analysis/<work>/<order>/<sample_id>/... is still detected.
+ANALYSIS_ORDER="${REPO_ROOT}/analysis/${WORK_ID}/${SOURCE_ORDER}"
+SOURCE_BAM="${ANALYSIS_ORDER}/alignment/${SOURCE_ORDER}.target.bam"
 SOURCE_BAI="${SOURCE_BAM}.bai"
-FF_VCF="${REPO_ROOT}/output/${WORK_ID}/${SOURCE_ORDER}/${SOURCE_ORDER}/fetal_fraction/${SOURCE_ORDER}.ff_variants.vcf"
+FF_VCF="${ANALYSIS_ORDER}/fetal_fraction/${SOURCE_ORDER}.ff_variants.vcf"
+
+if [[ ! -f "${SOURCE_BAM}" ]]; then
+    _legacy_bam="${ANALYSIS_ORDER}/${SOURCE_ORDER}/alignment/${SOURCE_ORDER}.target.bam"
+    if [[ -f "${_legacy_bam}" ]]; then
+        SOURCE_BAM="${_legacy_bam}"
+        SOURCE_BAI="${SOURCE_BAM}.bai"
+    fi
+fi
+if [[ ! -f "${FF_VCF}" ]]; then
+    _legacy_ff="${ANALYSIS_ORDER}/${SOURCE_ORDER}/fetal_fraction/${SOURCE_ORDER}.ff_variants.vcf"
+    [[ -f "${_legacy_ff}" ]] && FF_VCF="${_legacy_ff}"
+fi
 VARIANTS_TSV="${REPO_ROOT}/data/test/test_variants.tsv"
 SIM_SCRIPT="${REPO_ROOT}/bin/scripts/simulate_nipt_bam.py"
 SIM_BAM_DIR="${REPO_ROOT}/data/test/sim_bam"
@@ -159,6 +172,7 @@ for FF_PCT in ${FF_VALUES}; do
 
     DOCKER_CMD=(
         docker run --rm
+            --entrypoint python3
             --user "$(id -u):$(id -g)"
             -v "${SOURCE_BAM}:/input.bam:ro"
             -v "${SOURCE_BAI}:/input.bam.bai:ro"
@@ -171,7 +185,7 @@ for FF_PCT in ${FF_VALUES}; do
     fi
     DOCKER_CMD+=(
         "${DOCKER_IMAGE}"
-        python3 /simulate_nipt_bam.py
+        /simulate_nipt_bam.py
             --bam     /input.bam
             --output  "/out/${SAMPLE_NAME}.target.bam"
             --fetal-fraction "${FF_FLOAT}"

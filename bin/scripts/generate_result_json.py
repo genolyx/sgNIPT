@@ -42,30 +42,48 @@ def load_json_safe(path: Path) -> Optional[Dict[str, Any]]:
 
 
 def find_sample_outputs(output_dir: Path, sample_id: str) -> Dict[str, Optional[Path]]:
-    """Locate all output files for a given sample within the output directory."""
-    # Search patterns for each output type
+    """Locate all output files for a given sample within the output directory.
+
+    Prefers carrier-screening-style flat layout under outdir:
+      qc/, variant/, summary/, fetal_fraction/
+    Older sgNIPT nested layout (outdir/sample_id/...) is still accepted.
+    """
     patterns = {
         "fastq_qc": [
+            output_dir / "qc" / f"{sample_id}.fastq_qc.json",
+            output_dir / sample_id / "qc" / f"{sample_id}.fastq_qc.json",
             output_dir / sample_id / f"{sample_id}_fastq_qc.json",
             output_dir / "fastq_qc" / f"{sample_id}_fastq_qc.json",
             output_dir / f"{sample_id}_fastq_qc.json",
+            output_dir / f"{sample_id}.fastq_qc.json",
         ],
         "bam_qc": [
+            output_dir / "qc" / f"{sample_id}.bam_qc.json",
+            output_dir / sample_id / "qc" / f"{sample_id}.bam_qc.json",
             output_dir / sample_id / f"{sample_id}_bam_qc.json",
             output_dir / "bam_qc" / f"{sample_id}_bam_qc.json",
             output_dir / f"{sample_id}_bam_qc.json",
+            output_dir / f"{sample_id}.bam_qc.json",
         ],
         "fetal_fraction": [
+            output_dir / "fetal_fraction" / f"{sample_id}.fetal_fraction.json",
+            output_dir / sample_id / "fetal_fraction" / f"{sample_id}.fetal_fraction.json",
             output_dir / sample_id / f"{sample_id}_fetal_fraction.json",
             output_dir / "fetal_fraction" / f"{sample_id}_fetal_fraction.json",
             output_dir / f"{sample_id}_fetal_fraction.json",
+            output_dir / f"{sample_id}.fetal_fraction.json",
         ],
         "variant_report": [
+            output_dir / "variant" / f"{sample_id}.variant_report.json",
+            output_dir / sample_id / "variants" / f"{sample_id}.variant_report.json",
             output_dir / sample_id / f"{sample_id}_variant_report.json",
             output_dir / "variant_analysis" / f"{sample_id}_variant_report.json",
             output_dir / f"{sample_id}_variant_report.json",
+            output_dir / f"{sample_id}.variant_report.json",
         ],
         "final_report": [
+            output_dir / "summary" / f"{sample_id}_final_report.json",
+            output_dir / sample_id / "report" / f"{sample_id}_final_report.json",
             output_dir / sample_id / f"{sample_id}_final_report.json",
             output_dir / "reports" / f"{sample_id}_final_report.json",
             output_dir / f"{sample_id}_final_report.json",

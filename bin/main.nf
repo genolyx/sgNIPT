@@ -63,7 +63,7 @@ log.info """
 """.stripIndent()
 
 // ── Include modules ─────────────────────────────────────────────────────────
-include { FASTP; FASTQ_QC }                                            from './modules/preprocessing'
+include { FASTP; FASTQ_QC; MOCK_FASTQ_QC }                             from './modules/preprocessing'
 include { BWA_MEM2_ALIGN; MARK_DUPLICATES; EXTRACT_TARGET_READS }      from './modules/alignment'
 include { SAMTOOLS_FLAGSTAT; SAMTOOLS_STATS;
           MOSDEPTH; ON_TARGET_COUNT; BAM_QC_EVALUATE; MULTIQC }        from './modules/bam_qc'
@@ -141,13 +141,10 @@ workflow {
             .splitCsv(header: true, sep: ',')
             .map { row -> tuple(row.sample_id, file(row.bam), file(row.bai)) }
 
-        // Mock FASTQ QC JSON — GENERATE_REPORT accepts null/missing QC gracefully
-        ch_fastq_qc = ch_bam
-            .map { sample_id, bam, bai ->
-                def mock = task.workDir.resolve("${sample_id}.fastq_qc.json")
-                mock.text = """{"sample_id":"${sample_id}","source":"bam_input_mode","qc_passed":null}"""
-                tuple(sample_id, mock)
-            }
+        // Mock FASTQ QC JSON — produces a placeholder JSON so GENERATE_REPORT
+        // receives a consistent input tuple even without FASTQ preprocessing data.
+        MOCK_FASTQ_QC(ch_bam.map { sample_id, bam, bai -> sample_id })
+        ch_fastq_qc = MOCK_FASTQ_QC.out.fastq_qc_json
 
     } else {
         // ══════════════════════════════════════════════════════════════════
