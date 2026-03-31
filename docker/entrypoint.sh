@@ -62,6 +62,7 @@ FASTQ_R1_FILES=""
 FASTQ_R2_FILES=""
 TARGET_BED_NAME=""
 EXTRA_NF_ARGS=""
+INPUT_BAM_CSV=""    # BAM mode: path to bam_samplesheet.csv inside the container
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -70,6 +71,7 @@ while [[ $# -gt 0 ]]; do
         --fastq_r1)   FASTQ_R1_FILES="$2"; shift 2 ;;
         --fastq_r2)   FASTQ_R2_FILES="$2"; shift 2 ;;
         --target_bed) TARGET_BED_NAME="$2"; shift 2 ;;
+        --input_bam)  INPUT_BAM_CSV="$2";  shift 2 ;;
         --extra_args) EXTRA_NF_ARGS="$2";  shift 2 ;;
         *)
             log_error "Unknown argument: $1"
@@ -87,8 +89,9 @@ if [[ -z "$SAMPLE_NAMES" ]]; then
     log_error "--sample_name is required"
     exit 1
 fi
-if [[ -z "$FASTQ_R1_FILES" ]]; then
-    log_error "--fastq_r1 is required"
+# In BAM mode, FASTQ files are not required
+if [[ -z "$INPUT_BAM_CSV" ]] && [[ -z "$FASTQ_R1_FILES" ]]; then
+    log_error "Either --fastq_r1 (FASTQ mode) or --input_bam (BAM mode) is required"
     exit 1
 fi
 
@@ -247,49 +250,68 @@ fi
 
 update_progress "INIT" "BED files detected successfully"
 
-# ── Generate samplesheet ────────────────────────────────────────────────────
-SAMPLESHEET="${ANALYSIS_DIR}/samplesheet.csv"
-log_info "Generating samplesheet: ${SAMPLESHEET}"
-update_progress "INIT" "Generating samplesheet"
+# ── Generate samplesheet (FASTQ mode) OR validate BAM samplesheet ────────────
+NF_INPUT_ARG=""
 
-echo "sample_id,fastq_1,fastq_2" > "${SAMPLESHEET}"
-
-IFS=',' read -ra NAMES <<< "${SAMPLE_NAMES}"
-IFS=',' read -ra R1_FILES <<< "${FASTQ_R1_FILES}"
-
-if [[ -n "$FASTQ_R2_FILES" ]]; then
-    IFS=',' read -ra R2_FILES <<< "${FASTQ_R2_FILES}"
+if [[ -n "$INPUT_BAM_CSV" ]]; then
+    # ── BAM mode ────────────────────────────────────────────────────────────
+    log_info "BAM input mode: using pre-aligned BAM(s)"
+    log_info "BAM samplesheet: ${INPUT_BAM_CSV}"
+    if [[ ! -f "$INPUT_BAM_CSV" ]]; then
+        log_error "BAM samplesheet not found: ${INPUT_BAM_CSV}"
+        update_progress "ERROR" "BAM samplesheet not found"
+        exit 1
+    fi
+    # Count samples
+    BAM_COUNT=$(tail -n +2 "$INPUT_BAM_CSV" | wc -l)
+    log_info "BAM samplesheet has ${BAM_COUNT} sample(s)"
+    update_progress "INIT" "BAM samplesheet validated (${BAM_COUNT} sample(s))"
+    NF_INPUT_ARG="--input_bam ${INPUT_BAM_CSV}"
 else
-    R2_FILES=()
+    # ── FASTQ mode ──────────────────────────────────────────────────────────
+    SAMPLESHEET="${ANALYSIS_DIR}/samplesheet.csv"
+    log_info "Generating samplesheet: ${SAMPLESHEET}"
+    update_progress "INIT" "Generating samplesheet"
+
+    echo "sample_id,fastq_1,fastq_2" > "${SAMPLESHEET}"
+
+    IFS=',' read -ra NAMES <<< "${SAMPLE_NAMES}"
+    IFS=',' read -ra R1_FILES <<< "${FASTQ_R1_FILES}"
+
+    if [[ -n "$FASTQ_R2_FILES" ]]; then
+        IFS=',' read -ra R2_FILES <<< "${FASTQ_R2_FILES}"
+    else
+        R2_FILES=()
+    fi
+
+    for i in "${!NAMES[@]}"; do
+        SAMPLE="${NAMES[$i]}"
+        R1="${FASTQ_DIR}/${R1_FILES[$i]}"
+        R2=""
+
+        if [[ ${#R2_FILES[@]} -gt $i ]] && [[ -n "${R2_FILES[$i]}" ]]; then
+            R2="${FASTQ_DIR}/${R2_FILES[$i]}"
+        fi
+
+        if [[ ! -f "$R1" ]]; then
+            log_error "FASTQ R1 not found: ${R1}"
+            update_progress "ERROR" "FASTQ R1 not found: ${R1}"
+            exit 1
+        fi
+        if [[ -n "$R2" ]] && [[ ! -f "$R2" ]]; then
+            log_error "FASTQ R2 not found: ${R2}"
+            update_progress "ERROR" "FASTQ R2 not found: ${R2}"
+            exit 1
+        fi
+
+        echo "${SAMPLE},${R1},${R2}" >> "${SAMPLESHEET}"
+        log_info "  Sample: ${SAMPLE}  R1: ${R1}  R2: ${R2:-N/A}"
+    done
+
+    log_info "Samplesheet generated with ${#NAMES[@]} sample(s)"
+    update_progress "INIT" "Samplesheet generated with ${#NAMES[@]} sample(s)"
+    NF_INPUT_ARG="--input ${SAMPLESHEET}"
 fi
-
-for i in "${!NAMES[@]}"; do
-    SAMPLE="${NAMES[$i]}"
-    R1="${FASTQ_DIR}/${R1_FILES[$i]}"
-    R2=""
-
-    if [[ ${#R2_FILES[@]} -gt $i ]] && [[ -n "${R2_FILES[$i]}" ]]; then
-        R2="${FASTQ_DIR}/${R2_FILES[$i]}"
-    fi
-
-    # Validate FASTQ files exist
-    if [[ ! -f "$R1" ]]; then
-        log_error "FASTQ R1 not found: ${R1}"
-        update_progress "ERROR" "FASTQ R1 not found: ${R1}"
-        exit 1
-    fi
-    if [[ -n "$R2" ]] && [[ ! -f "$R2" ]]; then
-        log_error "FASTQ R2 not found: ${R2}"
-        update_progress "ERROR" "FASTQ R2 not found: ${R2}"
-        exit 1
-    fi
-
-    echo "${SAMPLE},${R1},${R2}" >> "${SAMPLESHEET}"
-    log_info "  Sample: ${SAMPLE}  R1: ${R1}  R2: ${R2:-N/A}"
-done
-
-log_info "Samplesheet generated with ${#NAMES[@]} sample(s)"
-update_progress "INIT" "Samplesheet generated with ${#NAMES[@]} sample(s)"
 
 # ── Check for user-provided config overrides ─────────────────────────────────
 NF_PARAMS_FILE=""
@@ -334,7 +356,7 @@ NF_CMD="nextflow run ${PIPELINE_DIR}/main.nf \
     -profile docker_internal \
     ${NF_RESUME} \
     ${NF_PARAMS_FILE} \
-    --input ${SAMPLESHEET} \
+    ${NF_INPUT_ARG} \
     --target_bed ${TARGET_BED} \
     ${FF_SNPS_ARG} \
     ${PROBES_ARG} \

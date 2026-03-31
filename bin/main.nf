@@ -29,6 +29,15 @@
 
 nextflow.enable.dsl = 2
 
+// ── Determine input mode ─────────────────────────────────────────────────────
+//   BAM mode  (--input_bam bam_samplesheet.csv):
+//     Skips FASTP → alignment → MARK_DUPLICATES → EXTRACT_TARGET_READS.
+//     Accepts a CSV with columns: sample_id, bam, bai
+//     Use case: simulated cfDNA BAMs (simulate_nipt_bam.py) or external BAMs.
+//   FASTQ mode (--input samplesheet.csv, default):
+//     Full pipeline from raw FASTQ files.
+def BAM_MODE = params.input_bam != null && params.input_bam.toString().trim() != ''
+
 // ── Print pipeline header ───────────────────────────────────────────────────
 log.info """
 ╔══════════════════════════════════════════════════════════════════╗
@@ -37,14 +46,15 @@ log.info """
 ║  Panel: Twist UCL_SingleGeneNIPT_TE-96276661 (hg38)            ║
 ╚══════════════════════════════════════════════════════════════════╝
 
-  Input samplesheet : ${params.input}
+  Input mode        : ${BAM_MODE ? 'BAM (alignment skipped)' : 'FASTQ'}
+  Input samplesheet : ${BAM_MODE ? params.input_bam : params.input}
   Target BED        : ${params.target_bed}
   Probes BED        : ${params.probes_bed ?: 'not provided'}
   FF SNPs BED       : ${params.ff_snps_bed ?: 'using target_bed'}
   Zero-probe BED    : ${params.zero_probe_bed ?: 'not provided'}
   Gene list         : ${params.gene_list ?: 'not provided'}
   Reference         : ${params.reference_fasta}
-  Aligner           : bwa-mem2 (fixed)
+  Aligner           : ${BAM_MODE ? 'N/A (BAM mode)' : 'bwa-mem2 (fixed)'}
   Variant caller    : bcftools (fixed)
   FF variant caller : bcftools (fixed)
   VEP annotation    : ${params.skip_vep ? 'DISABLED (snpEff fallback in daemon)' : 'ENABLED'}
@@ -96,74 +106,88 @@ def join_bam_bai(ch_bam, ch_bai) {
 // ── Main workflow ───────────────────────────────────────────────────────────
 workflow {
 
-    // ── Input channels ──────────────────────────────────────────────────
-    ch_reads       = parse_samplesheet(params.input)
+    // ── Shared reference / BED channels (both modes) ─────────────────────
     ch_target_bed  = Channel.fromPath(params.target_bed)
     ch_ref_fasta   = Channel.fromPath(params.reference_fasta)
     ch_ref_fai     = Channel.fromPath("${params.reference_fasta}.fai")
 
-    ch_bwa_index   = Channel.fromPath("${params.bwa_mem2_index_dir}/*").collect()
-
-    // FF SNPs BED: use dedicated ff_snps_bed if provided, otherwise fall back to target_bed
+    // FF SNPs BED: dedicated bed if provided, otherwise fall back to target_bed
     ch_ff_snps_bed = params.ff_snps_bed
         ? Channel.fromPath(params.ff_snps_bed)
         : Channel.fromPath(params.target_bed)
 
-    // Optional BED / gene list channels (provide dummy file name when absent)
+    // Optional BED / gene list channels
     ch_probes_bed     = params.probes_bed     ? Channel.fromPath(params.probes_bed)     : Channel.of(file('NO_PROBES_BED'))
     ch_zero_probe_bed = params.zero_probe_bed ? Channel.fromPath(params.zero_probe_bed) : Channel.of(file('NO_ZERO_PROBE_BED'))
     ch_gene_list      = params.gene_list      ? Channel.fromPath(params.gene_list)      : Channel.of(file('NO_GENE_LIST'))
 
-    // ══════════════════════════════════════════════════════════════════════
-    // STEP 1: FASTQ Preprocessing
-    // ══════════════════════════════════════════════════════════════════════
-    FASTP(ch_reads)
+    // ── Build ch_bam (tuple: sample_id, bam, bai) and ch_fastq_qc ───────
+    //
+    //   BAM mode  → read BAM samplesheet directly; create mock FASTQ QC JSON.
+    //   FASTQ mode → full FASTP → alignment → dedup → extract pipeline.
+    //
+    def ch_bam        // tuple(sample_id, bam, bai) entering BAM QC / FF / variant calling
+    def ch_fastq_qc   // tuple(sample_id, fastq_qc_json) for GENERATE_REPORT
+    def ch_multiqc_fastp = Channel.empty()   // FASTP JSON; empty in BAM mode
 
-    FASTQ_QC(FASTP.out.fastp_json)
+    if (BAM_MODE) {
+        // ══════════════════════════════════════════════════════════════════
+        // BAM INPUT MODE
+        //   Samplesheet format (CSV, header required):
+        //     sample_id,bam,bai
+        // ══════════════════════════════════════════════════════════════════
+        ch_bam = Channel
+            .fromPath(params.input_bam)
+            .splitCsv(header: true, sep: ',')
+            .map { row -> tuple(row.sample_id, file(row.bam), file(row.bai)) }
 
-    // ══════════════════════════════════════════════════════════════════════
-    // STEP 2: Alignment  (BWA-MEM2 — fixed)
-    // ══════════════════════════════════════════════════════════════════════
-    BWA_MEM2_ALIGN(
-        FASTP.out.trimmed_reads,
-        ch_bwa_index,
-    )
+        // Mock FASTQ QC JSON — GENERATE_REPORT accepts null/missing QC gracefully
+        ch_fastq_qc = ch_bam
+            .map { sample_id, bam, bai ->
+                def mock = task.workDir.resolve("${sample_id}.fastq_qc.json")
+                mock.text = """{"sample_id":"${sample_id}","source":"bam_input_mode","qc_passed":null}"""
+                tuple(sample_id, mock)
+            }
 
-    // ══════════════════════════════════════════════════════════════════════
-    // STEP 3: Mark Duplicates
-    // ══════════════════════════════════════════════════════════════════════
-    MARK_DUPLICATES(
-        BWA_MEM2_ALIGN.out.sorted_bam,
-        BWA_MEM2_ALIGN.out.sorted_bai,
-    )
+    } else {
+        // ══════════════════════════════════════════════════════════════════
+        // FASTQ INPUT MODE (default)
+        // ══════════════════════════════════════════════════════════════════
+        ch_reads     = parse_samplesheet(params.input)
+        ch_bwa_index = Channel.fromPath("${params.bwa_mem2_index_dir}/*").collect()
 
-    // ══════════════════════════════════════════════════════════════════════
-    // STEP 4: Extract Target Reads
-    // ══════════════════════════════════════════════════════════════════════
-    EXTRACT_TARGET_READS(
-        MARK_DUPLICATES.out.dedup_bam,
-        MARK_DUPLICATES.out.dedup_bai,
-        ch_target_bed.first(),
-    )
+        // STEP 1: FASTQ Preprocessing
+        FASTP(ch_reads)
+        FASTQ_QC(FASTP.out.fastp_json)
+        ch_fastq_qc      = FASTQ_QC.out.fastq_qc_json
+        ch_multiqc_fastp = FASTP.out.fastp_json.map { it[1] }
 
-    ch_dedup = join_bam_bai(
-        EXTRACT_TARGET_READS.out.target_bam,
-        EXTRACT_TARGET_READS.out.target_bai,
-    )
+        // STEP 2: Alignment (BWA-MEM2 — fixed)
+        BWA_MEM2_ALIGN(FASTP.out.trimmed_reads, ch_bwa_index)
+
+        // STEP 3: Mark Duplicates
+        MARK_DUPLICATES(BWA_MEM2_ALIGN.out.sorted_bam, BWA_MEM2_ALIGN.out.sorted_bai)
+
+        // STEP 4: Extract Target Reads
+        EXTRACT_TARGET_READS(
+            MARK_DUPLICATES.out.dedup_bam,
+            MARK_DUPLICATES.out.dedup_bai,
+            ch_target_bed.first(),
+        )
+
+        ch_bam = join_bam_bai(
+            EXTRACT_TARGET_READS.out.target_bam,
+            EXTRACT_TARGET_READS.out.target_bai,
+        )
+    }
 
     // ══════════════════════════════════════════════════════════════════════
     // STEP 5: BAM Quality Control
     // ══════════════════════════════════════════════════════════════════════
-    SAMTOOLS_FLAGSTAT(ch_dedup)
-    SAMTOOLS_STATS(ch_dedup)
-    MOSDEPTH(
-        ch_dedup,
-        ch_target_bed.first(),
-    )
-    ON_TARGET_COUNT(
-        ch_dedup,
-        ch_target_bed.first(),
-    )
+    SAMTOOLS_FLAGSTAT(ch_bam)
+    SAMTOOLS_STATS(ch_bam)
+    MOSDEPTH(ch_bam, ch_target_bed.first())
+    ON_TARGET_COUNT(ch_bam, ch_target_bed.first())
     BAM_QC_EVALUATE(
         SAMTOOLS_FLAGSTAT.out.flagstat,
         SAMTOOLS_STATS.out.stats,
@@ -177,10 +201,10 @@ workflow {
     // ══════════════════════════════════════════════════════════════════════
     // STEP 6: Fetal Fraction Estimation
     // ══════════════════════════════════════════════════════════════════════
-    COLLECT_FRAGMENT_SIZES(ch_dedup)
-    SAMTOOLS_IDXSTATS(ch_dedup)
+    COLLECT_FRAGMENT_SIZES(ch_bam)
+    SAMTOOLS_IDXSTATS(ch_bam)
     VARIANT_CALL_FOR_FF(
-        ch_dedup,
+        ch_bam,
         ch_ff_snps_bed.first(),
         ch_ref_fasta.first(),
         ch_ref_fai.first(),
@@ -193,16 +217,10 @@ workflow {
     )
 
     // ══════════════════════════════════════════════════════════════════════
-    // STEP 7: Variant Calling at Target Loci
+    // STEP 7: Variant Calling at Target Loci  (ch_bam = target BAM in both modes)
     // ══════════════════════════════════════════════════════════════════════
-    // ch_target: tuple(sample_id, bam, bai)
-    ch_target = join_bam_bai(
-        EXTRACT_TARGET_READS.out.target_bam,
-        EXTRACT_TARGET_READS.out.target_bai,
-    )
-
     VARIANT_CALL_TARGET(
-        ch_target,
+        ch_bam,
         ch_target_bed.first(),
         ch_ref_fasta.first(),
         ch_ref_fai.first(),
@@ -256,7 +274,7 @@ workflow {
     // STEP 9: Report Generation
     // ══════════════════════════════════════════════════════════════════════
     GENERATE_REPORT(
-        FASTQ_QC.out.fastq_qc_json,
+        ch_fastq_qc,
         BAM_QC_EVALUATE.out.bam_qc_json,
         ESTIMATE_FETAL_FRACTION.out.ff_json,
         VARIANT_ANALYSIS.out.variant_report,
@@ -268,7 +286,7 @@ workflow {
     // ══════════════════════════════════════════════════════════════════════
     ch_multiqc_files = Channel.empty()
     ch_multiqc_files = ch_multiqc_files
-        .mix(FASTP.out.fastp_json.map { it[1] })
+        .mix(ch_multiqc_fastp)              // empty in BAM mode
         .mix(SAMTOOLS_FLAGSTAT.out.flagstat.map { it[1] })
         .mix(SAMTOOLS_STATS.out.stats.map { it[1] })
         .mix(SAMTOOLS_IDXSTATS.out.idxstats.map { it[1] })

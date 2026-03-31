@@ -177,19 +177,21 @@ DETACHED=false
 WORK_DIR_ARG=""
 REF_DIR=""
 FRESH=""
+INPUT_BAM_HOST=""   # host path to bam_samplesheet.csv  (BAM mode; skips FASTQ steps)
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --order_id)          ORDER_ID="$2";          shift 2 ;;
-        --sample_name)       SAMPLE_NAMES="$2";      shift 2 ;;
-        --fastq_r1)          FASTQ_R1="$2";          shift 2 ;;
-        --fastq_r2)          FASTQ_R2="$2";          shift 2 ;;
-        --work_dir|-w)       WORK_DIR_ARG="$2";      shift 2 ;;
-        --ref_dir|-r)        REF_DIR="$2";           shift 2 ;;
-        --target_bed)  TARGET_BED="$2";  shift 2 ;;
-        --extra_args)  EXTRA_ARGS="$2"; shift 2 ;;
-        --fresh)             FRESH="1";             shift   ;;
-        --detached)          DETACHED=true;           shift   ;;
+        --order_id|--order-id)   ORDER_ID="$2";     shift 2 ;;
+        --sample_name)           SAMPLE_NAMES="$2"; shift 2 ;;
+        --fastq_r1)              FASTQ_R1="$2";     shift 2 ;;
+        --fastq_r2)              FASTQ_R2="$2";     shift 2 ;;
+        --work_dir|--work-id|-w) WORK_DIR_ARG="$2"; shift 2 ;;
+        --ref_dir|-r)            REF_DIR="$2";      shift 2 ;;
+        --target_bed)            TARGET_BED="$2";   shift 2 ;;
+        --extra_args)            EXTRA_ARGS="$2";   shift 2 ;;
+        --input-bam|--input_bam) INPUT_BAM_HOST="$2"; shift 2 ;;
+        --fresh)                 FRESH="1";          shift   ;;
+        --detached)              DETACHED=true;       shift   ;;
         *)
             echo "[ERROR] Unknown argument: $1"
             exit 1
@@ -228,46 +230,58 @@ if [[ ! "${ORDER_ID}" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
     exit 1
 fi
 
-# ── Auto-discover FASTQ under fastq/{work_dir}/{order_id}/ ─────────────────
-#  Expects e.g. * _R1.fastq.gz / _R2.fastq.gz (Illumina-style)
-if [[ -z "$FASTQ_R1" ]]; then
-    FASTQ_HOST_DIR="${HOST_FASTQ_DIR}/${WORK_DIR}/${ORDER_ID}"
-    if [[ ! -d "$FASTQ_HOST_DIR" ]]; then
-        echo "[ERROR] FASTQ directory not found: ${FASTQ_HOST_DIR}"
-        echo "[HINT]  Pass --work_dir and --order_id so that FASTQs live under fastq/{work_dir}/{order_id}/"
-        echo "       or set --fastq_r1 / --fastq_r2 explicitly."
+# ── BAM mode vs FASTQ mode ──────────────────────────────────────────────────
+if [[ -n "$INPUT_BAM_HOST" ]]; then
+    # ── BAM mode: skip all FASTQ discovery ──────────────────────────────────
+    if [[ ! -f "$INPUT_BAM_HOST" ]]; then
+        echo "[ERROR] BAM samplesheet not found: ${INPUT_BAM_HOST}"
         exit 1
     fi
-    mapfile -t _R1_CAND < <(find "$FASTQ_HOST_DIR" -maxdepth 1 -type f \( -name '*_R1.fastq.gz' -o -name '*_R1.fq.gz' \) | sort)
-    if [[ ${#_R1_CAND[@]} -eq 0 ]]; then
-        echo "[ERROR] No R1 FASTQ (*_R1.fastq.gz) found under: ${FASTQ_HOST_DIR}"
-        exit 1
+    # Convert host path → container-internal path.
+    # The BAM CSV lives under HOST_DATA_DIR (mounted at /Work/SgNIPT/data).
+    INPUT_BAM_CONTAINER="/Work/SgNIPT/data/${INPUT_BAM_HOST#${HOST_DATA_DIR}/}"
+    echo "[INFO] BAM mode: using samplesheet ${INPUT_BAM_HOST}"
+    echo "       Container path: ${INPUT_BAM_CONTAINER}"
+else
+    # ── FASTQ mode: auto-discover or use explicit paths ──────────────────────
+    if [[ -z "$FASTQ_R1" ]]; then
+        FASTQ_HOST_DIR="${HOST_FASTQ_DIR}/${WORK_DIR}/${ORDER_ID}"
+        if [[ ! -d "$FASTQ_HOST_DIR" ]]; then
+            echo "[ERROR] FASTQ directory not found: ${FASTQ_HOST_DIR}"
+            echo "[HINT]  Pass --work-id and --order-id so that FASTQs live under fastq/{work_id}/{order_id}/"
+            echo "       or set --fastq_r1 / --fastq_r2 explicitly, or use --input-bam for BAM mode."
+            exit 1
+        fi
+        mapfile -t _R1_CAND < <(find "$FASTQ_HOST_DIR" -maxdepth 1 -type f \( -name '*_R1.fastq.gz' -o -name '*_R1.fq.gz' \) | sort)
+        if [[ ${#_R1_CAND[@]} -eq 0 ]]; then
+            echo "[ERROR] No R1 FASTQ (*_R1.fastq.gz) found under: ${FASTQ_HOST_DIR}"
+            exit 1
+        fi
+        if [[ ${#_R1_CAND[@]} -gt 1 ]]; then
+            echo "[ERROR] Multiple R1 FASTQ files found; specify --fastq_r1 and --fastq_r2 explicitly:"
+            printf '  %s\n' "${_R1_CAND[@]}"
+            exit 1
+        fi
+        _R1_ABS="${_R1_CAND[0]}"
+        _BASE="$(basename "$_R1_ABS")"
+        _R2_ABS="${FASTQ_HOST_DIR}/${_BASE/_R1.fastq.gz/_R2.fastq.gz}"
+        [[ -f "$_R2_ABS" ]] || _R2_ABS="${FASTQ_HOST_DIR}/${_BASE/_R1.fq.gz/_R2.fq.gz}"
+        if [[ ! -f "$_R2_ABS" ]]; then
+            echo "[ERROR] Paired R2 not found for: ${_R1_ABS}"
+            echo "[ERROR] Expected: ${_R2_ABS}"
+            exit 1
+        fi
+        FASTQ_R1="${WORK_DIR}/${ORDER_ID}/${_BASE}"
+        FASTQ_R2="${WORK_DIR}/${ORDER_ID}/$(basename "$_R2_ABS")"
+        echo "[INFO] Auto-selected FASTQ pair:"
+        echo "       R1: ${FASTQ_R1}"
+        echo "       R2: ${FASTQ_R2}"
     fi
-    if [[ ${#_R1_CAND[@]} -gt 1 ]]; then
-        echo "[ERROR] Multiple R1 FASTQ files found; specify --fastq_r1 and --fastq_r2 explicitly:"
-        printf '  %s\n' "${_R1_CAND[@]}"
-        exit 1
-    fi
-    _R1_ABS="${_R1_CAND[0]}"
-    _BASE="$(basename "$_R1_ABS")"
-    _R2_ABS="${FASTQ_HOST_DIR}/${_BASE/_R1.fastq.gz/_R2.fastq.gz}"
-    [[ -f "$_R2_ABS" ]] || _R2_ABS="${FASTQ_HOST_DIR}/${_BASE/_R1.fq.gz/_R2.fq.gz}"
-    if [[ ! -f "$_R2_ABS" ]]; then
-        echo "[ERROR] Paired R2 not found for: ${_R1_ABS}"
-        echo "[ERROR] Expected: ${_R2_ABS}"
-        exit 1
-    fi
-    # Paths relative to HOST_FASTQ_DIR (container: /Work/SgNIPT/fastq/...)
-    FASTQ_R1="${WORK_DIR}/${ORDER_ID}/${_BASE}"
-    FASTQ_R2="${WORK_DIR}/${ORDER_ID}/$(basename "$_R2_ABS")"
-    echo "[INFO] Auto-selected FASTQ pair:"
-    echo "       R1: ${FASTQ_R1}"
-    echo "       R2: ${FASTQ_R2}"
-fi
 
-if [[ -z "$FASTQ_R1" ]]; then
-    echo "[ERROR] --fastq_r1 is required (or use auto-discovery with fastq/${WORK_DIR}/${ORDER_ID}/)"
-    exit 1
+    if [[ -z "$FASTQ_R1" ]]; then
+        echo "[ERROR] --fastq_r1 is required (or use --input-bam for BAM mode)"
+        exit 1
+    fi
 fi
 
 # ── Ensure top-level directories exist ───────────────────────────────────────
@@ -319,22 +333,19 @@ fi
 
 # ── Build entrypoint arguments ───────────────────────────────────────────────
 ENTRYPOINT_ARGS=(
-    --order_id "$ORDER_ID"
-    --sample_name "$SAMPLE_NAMES"
-    --fastq_r1 "$FASTQ_R1"
+    --order_id     "$ORDER_ID"
+    --sample_name  "$SAMPLE_NAMES"
 )
 
-if [[ -n "$FASTQ_R2" ]]; then
-    ENTRYPOINT_ARGS+=(--fastq_r2 "$FASTQ_R2")
+if [[ -n "$INPUT_BAM_HOST" ]]; then
+    ENTRYPOINT_ARGS+=(--input_bam "$INPUT_BAM_CONTAINER")
+else
+    ENTRYPOINT_ARGS+=(--fastq_r1 "$FASTQ_R1")
+    [[ -n "$FASTQ_R2" ]] && ENTRYPOINT_ARGS+=(--fastq_r2 "$FASTQ_R2")
 fi
 
-if [[ -n "$TARGET_BED" ]]; then
-    ENTRYPOINT_ARGS+=(--target_bed "$TARGET_BED")
-fi
-
-if [[ -n "$EXTRA_ARGS" ]]; then
-    ENTRYPOINT_ARGS+=(--extra_args "$EXTRA_ARGS")
-fi
+[[ -n "$TARGET_BED"  ]] && ENTRYPOINT_ARGS+=(--target_bed "$TARGET_BED")
+[[ -n "$EXTRA_ARGS"  ]] && ENTRYPOINT_ARGS+=(--extra_args "$EXTRA_ARGS")
 
 # 1-D: docker.sock is root:docker → container needs the docker GID as supplementary group
 DOCKER_GROUP_ARGS=()
