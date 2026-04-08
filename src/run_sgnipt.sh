@@ -170,6 +170,10 @@ ensure_sample_output_dirs() {
 }
 
 # ── Parse arguments ──────────────────────────────────────────────────────────
+require_arg() {
+    [ $# -ge 2 ] && [ -n "$2" ] || { echo "[ERROR] $1 requires a value"; exit 1; }
+}
+
 ORDER_ID=""
 SAMPLE_NAMES=""
 FASTQ_R1=""
@@ -184,15 +188,15 @@ INPUT_BAM_HOST=""   # host path to bam_samplesheet.csv  (BAM mode; skips FASTQ s
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --order_id|--order-id)   ORDER_ID="$2";     shift 2 ;;
-        --sample_name)           SAMPLE_NAMES="$2"; shift 2 ;;
-        --fastq_r1)              FASTQ_R1="$2";     shift 2 ;;
-        --fastq_r2)              FASTQ_R2="$2";     shift 2 ;;
-        --work_dir|--work-id|-w) WORK_DIR_ARG="$2"; shift 2 ;;
-        --ref_dir|-r)            REF_DIR="$2";      shift 2 ;;
-        --target_bed)            TARGET_BED="$2";   shift 2 ;;
-        --extra_args)            EXTRA_ARGS="$2";   shift 2 ;;
-        --input-bam|--input_bam) INPUT_BAM_HOST="$2"; shift 2 ;;
+        --order_id|--order-id)   require_arg "$1" "${2:-}"; ORDER_ID="$2";         shift 2 ;;
+        --sample_name)           require_arg "$1" "${2:-}"; SAMPLE_NAMES="$2";     shift 2 ;;
+        --fastq_r1)              require_arg "$1" "${2:-}"; FASTQ_R1="$2";         shift 2 ;;
+        --fastq_r2)              require_arg "$1" "${2:-}"; FASTQ_R2="$2";         shift 2 ;;
+        --work_dir|--work-id|-w) require_arg "$1" "${2:-}"; WORK_DIR_ARG="$2";     shift 2 ;;
+        --ref_dir|-r)            require_arg "$1" "${2:-}"; REF_DIR="$2";          shift 2 ;;
+        --target_bed)            require_arg "$1" "${2:-}"; TARGET_BED="$2";       shift 2 ;;
+        --extra_args)            require_arg "$1" "${2:-}"; EXTRA_ARGS="$2";       shift 2 ;;
+        --input-bam|--input_bam) require_arg "$1" "${2:-}"; INPUT_BAM_HOST="$2";   shift 2 ;;
         --fresh)                 FRESH="1";          shift   ;;
         --detached)              DETACHED=true;       shift   ;;
         *)
