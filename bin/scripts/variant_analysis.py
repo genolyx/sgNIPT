@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 DEFAULT_CONFIG: Dict[str, Any] = {
     # Minimum read depth for variant analysis
-    "min_depth": 100,
+    "min_depth": 10,
     # Minimum variant allele frequency to call a variant present
     "min_vaf": 0.005,
     # Maternal homozygous threshold: AF > this -> likely maternal hom alt

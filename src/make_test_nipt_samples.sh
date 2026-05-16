@@ -133,12 +133,20 @@ fi
 FF_VCF_MOUNT=""
 FF_VCF_ARG=""
 if [[ -f "${FF_VCF}" ]]; then
+    FF_VCF_HOMALT=$(grep -v "^#" "${FF_VCF}" | grep -c "1/1" || true)
     FF_VCF_MOUNT="-v ${FF_VCF}:/ff_variants.vcf:ro"
     FF_VCF_ARG="--ff-vcf /ff_variants.vcf --n-ff-snps 100"
+    echo "[INFO] FF VCF found: ${FF_VCF}"
+    echo "       Hom-alt (1/1) SNPs available: ${FF_VCF_HOMALT}"
 else
-    echo "[WARN] FF VCF not found: ${FF_VCF}"
-    echo "       FF-informative SNP spiking will be skipped."
-    echo "       The SNP-based fetal fraction method will still report INSUFFICIENT_DATA."
+    echo ""
+    echo "[ERROR] FF VCF not found: ${FF_VCF}"
+    echo "        The source order '${SOURCE_ORDER}' must complete analysis first."
+    echo "        FF-informative SNP spiking requires the ff_variants.vcf from a"
+    echo "        completed pipeline run. Without it, FF estimation will FAIL."
+    echo ""
+    echo "        Run the pipeline on '${SOURCE_ORDER}' first, then re-run this script."
+    exit 1
 fi
 
 run_or_echo() {
@@ -236,6 +244,11 @@ echo " The --input_bam flag tells the pipeline to skip:"
 echo "   FASTP → BWA_MEM2_ALIGN → MARK_DUPLICATES → EXTRACT_TARGET_READS"
 echo " and start directly at:"
 echo "   BAM_QC → FF Estimation → Variant Calling → VEP → Report"
+echo ""
+echo " Portal/daemon: SGNIPT_ROOT_DIR may point at /data/sgnipt_work while CSVs live under"
+echo " the repo (…/sgNIPT/data/test/sim_bam/). Either:"
+echo "   • export SGNIPT_DATA_DIR=\"${REPO_ROOT}/data\" before run_sgnipt.sh, or"
+echo "   • copy sim_bam under \${SGNIPT_ROOT_DIR}/data/test/sim_bam/"
 echo ""
 
 for SAMPLE_NAME in "${GENERATED_SAMPLES[@]}"; do

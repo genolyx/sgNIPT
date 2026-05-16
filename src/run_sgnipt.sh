@@ -245,8 +245,34 @@ if [[ -n "$INPUT_BAM_HOST" ]]; then
         exit 1
     fi
     # Convert host path → container-internal path.
-    # The BAM CSV lives under HOST_DATA_DIR (mounted at /Work/SgNIPT/data).
-    INPUT_BAM_CONTAINER="/Work/SgNIPT/data/${INPUT_BAM_HOST#${HOST_DATA_DIR}/}"
+    # Docker mounts HOST_DATA_DIR at /Work/SgNIPT/data — the CSV must live under that tree
+    # on the host, or the container cannot see it.
+    INPUT_BAM_ABS="$(realpath "$INPUT_BAM_HOST")"
+    HOST_DATA_ABS="$(realpath "$HOST_DATA_DIR" 2>/dev/null || echo "")"
+    PROJECT_DATA_ABS="$(realpath "${PROJECT_DIR}/data" 2>/dev/null || echo "")"
+
+    # Daemon often sets SGNIPT_ROOT_DIR=/data/sgnipt_work while test CSVs live under the
+    # repo clone (…/sgNIPT/data/...).  Align HOST_DATA_DIR to repo data/ when applicable.
+    if [[ -n "$HOST_DATA_ABS" && -n "$PROJECT_DATA_ABS" ]] \
+        && [[ "$INPUT_BAM_ABS" == "$PROJECT_DATA_ABS"/* ]] \
+        && [[ "$INPUT_BAM_ABS" != "$HOST_DATA_ABS"/* ]]; then
+        echo "[WARN] --input-bam is under repo data/: ${PROJECT_DATA_ABS}"
+        echo "       but HOST_DATA_DIR was ${HOST_DATA_DIR}. Using repo data for docker mount."
+        HOST_DATA_DIR="${PROJECT_DATA_ABS}"
+        HOST_DATA_ABS="${PROJECT_DATA_ABS}"
+    fi
+
+    if [[ -z "$HOST_DATA_ABS" ]] || [[ "$INPUT_BAM_ABS" != "$HOST_DATA_ABS"/* ]]; then
+        echo "[ERROR] BAM samplesheet must be under HOST_DATA_DIR (mounted as /Work/SgNIPT/data)."
+        echo "  Resolved file:  ${INPUT_BAM_ABS}"
+        echo "  HOST_DATA_DIR:   ${HOST_DATA_DIR} → ${HOST_DATA_ABS:-invalid}"
+        echo "  Fix: put the CSV under the same tree as HOST_DATA_DIR, or set:"
+        echo "       export SGNIPT_DATA_DIR=\"/path/to/sgNIPT/data\""
+        echo "       (the directory that contains test/, target_bed/, etc.)"
+        exit 1
+    fi
+    REL="${INPUT_BAM_ABS#${HOST_DATA_ABS}/}"
+    INPUT_BAM_CONTAINER="/Work/SgNIPT/data/${REL}"
     echo "[INFO] BAM mode: using samplesheet ${INPUT_BAM_HOST}"
     echo "       Container path: ${INPUT_BAM_CONTAINER}"
 else

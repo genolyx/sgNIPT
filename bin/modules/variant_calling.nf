@@ -10,9 +10,12 @@
  *
  *  Caller: bcftools mpileup + call (fixed)
  *    cfDNA NIPT requires detection of fetal-specific variants at VAF ≈ FF/2
- *    (typically 3–10%). Germline callers (GATK HC, DeepVariant, Strelka2)
- *    treat sub-20% VAF as noise and filter them out. bcftools reports allele
- *    counts without diploid genotype assumptions, preserving the fetal signal.
+ *    (typically 3–10%).  Unlike germline calling, we output ALL sites with
+ *    any ALT evidence (not just those passing the diploid genotype model)
+ *    so that variant_analysis.py can classify low-frequency fetal alleles.
+ *    The bcftools call step still runs (produces genotype + AD/DP fields)
+ *    but -v is omitted; instead we keep sites with ≥ 1 ALT read via
+ *    bcftools view -i 'ALT!="."'.
  * ============================================================================
  */
 
@@ -43,8 +46,10 @@ process VARIANT_CALL_TARGET {
         ${bam} \\
     | bcftools call \\
         -m \\
-        -v \\
         --ploidy 2 \\
+        -Ou \\
+    | bcftools view \\
+        -i 'ALT!="."' \\
         -Ou \\
     | bcftools sort \\
         -Oz \\

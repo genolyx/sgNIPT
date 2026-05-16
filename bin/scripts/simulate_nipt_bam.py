@@ -143,6 +143,54 @@ def parse_ff_snps(vcf_path: str, n_snps: int, min_depth: int = 30) -> list:
     return snps
 
 
+def check_maternal_genotype(bam_in: pysam.AlignmentFile,
+                           chrom: str,
+                           pos0: int,
+                           ref: str,
+                           alt: str) -> str:
+    """
+    Check the maternal (source BAM) genotype at a position.
+
+    Returns 'hom_ref' if ≥90% of reads match ref, 'het' if 30-70% alt,
+    'hom_alt' if ≥90% match alt, or 'other'.
+    """
+    try:
+        reads = [
+            r for r in bam_in.fetch(chrom, pos0, pos0 + 1)
+            if not r.is_unmapped and not r.is_secondary and not r.is_supplementary
+        ]
+    except ValueError:
+        return "no_data"
+    if not reads:
+        return "no_data"
+
+    ref_count = alt_count = other_count = 0
+    for r in reads:
+        pairs = {rp: qp for qp, rp in r.get_aligned_pairs(matches_only=True)}
+        qp = pairs.get(pos0)
+        if qp is None:
+            continue
+        base = r.query_sequence[qp].upper()
+        if base == ref.upper():
+            ref_count += 1
+        elif base == alt.upper():
+            alt_count += 1
+        else:
+            other_count += 1
+
+    total = ref_count + alt_count + other_count
+    if total == 0:
+        return "no_data"
+    ref_frac = ref_count / total
+    if ref_frac >= 0.90:
+        return "hom_ref"
+    elif ref_frac <= 0.10:
+        return "hom_alt"
+    elif 0.30 <= ref_frac <= 0.70:
+        return "het"
+    return "other"
+
+
 def spike_reads(bam_in: pysam.AlignmentFile,
                 chrom: str,
                 pos0: int,
@@ -268,6 +316,27 @@ def main():
     # ---- spike reads ----
     bam_in    = pysam.AlignmentFile(args.bam, "rb")
     tmp_path  = args.output + ".tmp_unsorted.bam"
+
+    # Pre-flight: verify maternal genotype at disease variant positions
+    if disease_variants:
+        print("[simulate_nipt_bam] Verifying maternal genotype at disease positions …",
+              file=sys.stderr)
+        skipped = []
+        for v in disease_variants:
+            gt = check_maternal_genotype(bam_in, v["chrom"], v["pos0"], v["ref"], v["alt"])
+            status = "OK" if gt == "hom_ref" else f"WARN ({gt})"
+            print(f"  [check] {v['label']}  {v['chrom']}:{v['pos0']+1}  "
+                  f"ref={v['ref']} alt={v['alt']}  maternal={gt}  {status}",
+                  file=sys.stderr)
+            if gt != "hom_ref":
+                skipped.append(v)
+                print(f"  [SKIP]  {v['label']} — maternal is NOT hom-ref, spike would be meaningless",
+                      file=sys.stderr)
+        for v in skipped:
+            disease_variants.remove(v)
+        if skipped:
+            print(f"[simulate_nipt_bam] Skipped {len(skipped)} variants (maternal not hom-ref)",
+                  file=sys.stderr)
 
     total_added = 0
     extra_reads = []

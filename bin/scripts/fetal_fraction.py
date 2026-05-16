@@ -143,15 +143,22 @@ def parse_vcf_for_snps(
             if dp is None or dp < config["min_depth"]:
                 continue
 
-            # Calculate minor allele frequency
+            # Calculate minor allele frequency — use the TRUE minor allele,
+            # not just the ALT frequency.  At hom-alt (1/1) sites with spiked
+            # REF reads, the REF is the minor allele (fetal contribution).
             if ad and len(ad) >= 2:
                 ref_count = ad[0]
                 alt_count = sum(ad[1:])
-                minor_af = alt_count / dp if dp > 0 else 0.0
+                alt_af = alt_count / dp if dp > 0 else 0.0
+                minor_af = min(alt_af, 1.0 - alt_af)
+                minor_count = min(ref_count, alt_count)
+                major_count = max(ref_count, alt_count)
             elif af is not None:
-                minor_af = af
+                minor_af = min(af, 1.0 - af)
                 ref_count = int(dp * (1 - af))
                 alt_count = dp - ref_count
+                minor_count = min(ref_count, alt_count)
+                major_count = max(ref_count, alt_count)
             else:
                 continue
 
@@ -240,7 +247,8 @@ def parse_pileup_for_snps(
                     alt_base = max(non_ref, key=non_ref.get)
                     alt_count = non_ref[alt_base]
 
-            minor_af = alt_count / total if total > 0 else 0.0
+            alt_af = alt_count / total if total > 0 else 0.0
+            minor_af = min(alt_af, 1.0 - alt_af)
 
             snps.append({
                 "chrom": chrom,
