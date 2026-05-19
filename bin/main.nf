@@ -36,18 +36,24 @@ nextflow.enable.dsl = 2
 //     Use case: simulated cfDNA BAMs (simulate_nipt_bam.py) or external BAMs.
 //   FASTQ mode (--input samplesheet.csv, default):
 //     Full pipeline from raw FASTQ files.
-def BAM_MODE = params.input_bam != null && params.input_bam.toString().trim() != ''
+//
+// Note: Nextflow DSL2 (≥ 24.x) forbids top-level statements/assignments.  Use a
+// helper function instead of `def BAM_MODE = ...`.
+def isBamMode() {
+    params.input_bam != null && params.input_bam.toString().trim() != ''
+}
 
-// ── Print pipeline header ───────────────────────────────────────────────────
-log.info """
+// ── Pipeline header (printed at the start of workflow {} below) ────────────
+def printHeader() {
+    log.info """
 ╔══════════════════════════════════════════════════════════════════╗
 ║           Single Gene NIPT Pipeline v${params.pipeline_version}                  ║
 ║  Non-Invasive Prenatal Testing for Single Gene Disorders        ║
 ║  Panel: Twist UCL_SingleGeneNIPT_TE-96276661 (hg38)            ║
 ╚══════════════════════════════════════════════════════════════════╝
 
-  Input mode        : ${BAM_MODE ? 'BAM (alignment skipped)' : 'FASTQ'}
-  Input samplesheet : ${BAM_MODE ? params.input_bam : params.input}
+  Input mode        : ${isBamMode() ? 'BAM (alignment skipped)' : 'FASTQ'}
+  Input samplesheet : ${isBamMode() ? params.input_bam : params.input}
   Target BED        : ${params.target_bed}
   Probes BED        : ${params.probes_bed ?: 'not provided'}
   FF SNPs BED       : ${params.ff_snps_bed ?: 'using target_bed'}
@@ -57,13 +63,14 @@ log.info """
   UPD BED           : ${params.upd_bed ?: 'not provided'}
   UPD common SNPs   : ${params.upd_common_snps_vcf ?: 'not provided (noisier)'}
   Reference         : ${params.reference_fasta}
-  Aligner           : ${BAM_MODE ? 'N/A (BAM mode)' : 'bwa-mem2 (fixed)'}
+  Aligner           : ${isBamMode() ? 'N/A (BAM mode)' : 'bwa-mem2 (fixed)'}
   Variant caller    : bcftools (fixed)
   FF variant caller : bcftools (fixed)
   VEP annotation    : ${params.skip_vep ? 'DISABLED (snpEff fallback in daemon)' : 'ENABLED'}
   Output directory  : ${params.outdir}
   ─────────────────────────────────────────────────────────────────
 """.stripIndent()
+}
 
 // ── Include modules ─────────────────────────────────────────────────────────
 include { FASTP; FASTQ_QC; MOCK_FASTQ_QC }                             from './modules/preprocessing'
@@ -110,6 +117,8 @@ def join_bam_bai(ch_bam, ch_bai) {
 // ── Main workflow ───────────────────────────────────────────────────────────
 workflow {
 
+    printHeader()
+
     // ── Shared reference / BED channels (both modes) ─────────────────────
     ch_target_bed  = Channel.fromPath(params.target_bed)
     ch_ref_fasta   = Channel.fromPath(params.reference_fasta)
@@ -134,9 +143,9 @@ workflow {
     def ch_bam_full   // tuple(sample_id, bam, bai) — pre-target-extract (used by UPD module
                      //                                so off-target chrom regions remain visible)
     def ch_fastq_qc   // tuple(sample_id, fastq_qc_json) for GENERATE_REPORT
-    def ch_multiqc_fastp = Channel.empty()   // FASTP JSON; empty in BAM mode
+    ch_multiqc_fastp = Channel.empty()   // FASTP JSON; empty in BAM mode
 
-    if (BAM_MODE) {
+    if (isBamMode()) {
         // ══════════════════════════════════════════════════════════════════
         // BAM INPUT MODE
         //   Samplesheet format (CSV, header required):
@@ -271,7 +280,7 @@ workflow {
     //  Operates on the pre-extract dedup BAM (ch_bam_full) so reads outside
     //  the panel target footprint (gene introns + flanking) are visible.
     //  Skipped if `params.run_upd = false` or no `params.upd_bed` provided.
-    def ch_upd_report = Channel.empty()
+    ch_upd_report = Channel.empty()
     if (params.run_upd && params.upd_bed) {
         ch_upd_bed         = Channel.fromPath(params.upd_bed)
         ch_upd_common_snps = params.upd_common_snps_vcf
@@ -323,7 +332,7 @@ workflow {
     // ══════════════════════════════════════════════════════════════════════
     //  UPD JSON is fed in as an optional 6th channel; if UPD step was skipped
     //  the report process receives a per-sample placeholder so the join works.
-    def ch_upd_for_report = ch_upd_report
+    ch_upd_for_report = ch_upd_report
         .ifEmpty { return Channel.empty() }
     if (!(params.run_upd && params.upd_bed)) {
         ch_upd_for_report = ch_bam.map { sample_id, _bam, _bai ->
@@ -355,7 +364,7 @@ workflow {
     MULTIQC(ch_multiqc_files)
 }
 
-// ── Workflow completion handler ─────────────────────────────────────────────
+// ── Workflow completion / error handlers (Nextflow 24.x DSL2 syntax) ────────
 workflow.onComplete {
     def vep_status = params.skip_vep ? 'SKIPPED' : 'COMPLETED'
     log.info """

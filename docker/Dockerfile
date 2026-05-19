@@ -35,6 +35,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Install Nextflow ────────────────────────────────────────────────────────
+# Pin Nextflow to 24.10.5 — Nextflow 25+/26+ enables strict DSL2 mode that
+# rejects this pipeline's top-level helpers (log.info, workflow.onComplete).
+# 24.10.x is the last LTS line that accepts the legacy syntax.
+ENV NXF_VER=24.10.5
 RUN curl -s https://get.nextflow.io | bash && \
     mv nextflow /usr/local/bin/ && \
     chmod +x /usr/local/bin/nextflow && \
