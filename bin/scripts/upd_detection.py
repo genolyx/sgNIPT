@@ -111,6 +111,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "patupd_vaf_hi_factor": 1.3,
     # Per-chrom call thresholds
     "llr_call_threshold": 5.0,         # ln(BF) > 5 ≈ ~150x evidence
+    # matUPD_het is the 'het-disomy' form: the fetal genome has two DIFFERENT
+    # maternal copies.  Its BAF signature at mat-het sites is identical to the
+    # normal model (both predict VAF ≈ 0.5).  Calling it from LLR alone always
+    # yields false positives.  Set a deliberately high threshold so it is only
+    # flagged if the signal is overwhelming; in practice matUPD_het is not
+    # reliably detectable from cfDNA BAF without haplotype-phase data.
+    "llr_matupd_het_call_threshold": 500.0,
     "patupd_excess_z_threshold": 4.0,  # z-score for patUPD-iso/het call
     # Sequencing error baseline (used for null)
     "seq_error_rate": 0.005,
@@ -466,34 +473,44 @@ def make_call(chrom_results: list[dict[str, Any]],
         f = r["mat_hom_mende"]["frac_fetal_homalt"]
         r["patupd_z"] = round((f - mu) / max(sd, 1e-4), 3)
 
-        # Decide
-        call = "normal"
+        # Decide — het-arm (matUPD) and hom-arm (patUPD) are evaluated independently
+        call  = "normal"
         notes: list[str] = []
-        info_ok = (r["n_mat_het"] >= cfg["min_mat_het_snps_baf"]
-                   and r["n_mat_hom"] >= cfg["min_mat_hom_snps_mende"])
-        if not info_ok:
-            call = "INSUFFICIENT_INFORMATION"
+        llr   = r["llr_vs_normal"]
+        patupd_z = r["patupd_z"]
+
+        het_ok = r["n_mat_het"] >= cfg["min_mat_het_snps_baf"]
+        hom_ok = r["n_mat_hom"] >= cfg["min_mat_hom_snps_mende"]
+
+        if not het_ok:
             notes.append(
-                f"need ≥ {cfg['min_mat_het_snps_baf']} mat-het and "
-                f"≥ {cfg['min_mat_hom_snps_mende']} mat-hom; "
-                f"have {r['n_mat_het']} / {r['n_mat_hom']}.")
-        else:
-            llr = r["llr_vs_normal"]
-            patupd_z = r["patupd_z"]
-            if patupd_z >= cfg["patupd_excess_z_threshold"]:
-                # Strong Mendelian-error excess → paternal UPD
-                if llr["patupd_iso"] >= cfg["llr_call_threshold"]:
-                    call = "patUPD_iso_suspected"
-                else:
-                    call = "patUPD_het_suspected"
-            elif llr["matupd_het"] >= cfg["llr_call_threshold"] \
-                    and llr["matupd_het"] > llr["matupd_iso"]:
-                call = "matUPD_het_suspected"
-            elif llr["matupd_iso"] >= cfg["llr_call_threshold"] \
-                    and llr["matupd_iso"] > llr["matupd_het"]:
-                call = "matUPD_iso_suspected"
+                f"BAF-LLR arm: need ≥ {cfg['min_mat_het_snps_baf']} mat-het SNPs "
+                f"(have {r['n_mat_het']}).")
+        if not hom_ok:
+            notes.append(
+                f"Mendelian-error arm: need ≥ {cfg['min_mat_hom_snps_mende']} mat-hom SNPs "
+                f"(have {r['n_mat_hom']}).")
+
+        # patUPD: driven by Mendelian-error excess at hom sites
+        if hom_ok and patupd_z >= cfg["patupd_excess_z_threshold"]:
+            if llr["patupd_iso"] >= cfg["llr_call_threshold"]:
+                call = "patUPD_iso_suspected"
             else:
-                call = "normal"
+                call = "patUPD_het_suspected"
+        # matUPD: driven by BAF shift at het sites
+        # Note: matUPD_het uses a very high threshold because it is
+        # indistinguishable from normal by BAF alone (see cfg comment above).
+        elif het_ok and llr["matupd_het"] >= cfg["llr_matupd_het_call_threshold"] \
+                and llr["matupd_het"] > llr["matupd_iso"]:
+            call = "matUPD_het_suspected"
+        elif het_ok and llr["matupd_iso"] >= cfg["llr_call_threshold"] \
+                and llr["matupd_iso"] > llr["matupd_het"]:
+            call = "matUPD_iso_suspected"
+        elif not het_ok and not hom_ok:
+            call = "INSUFFICIENT_INFORMATION"
+        else:
+            # at least one arm has data; no significant signal
+            call = "normal"
 
         r["call"] = call
         r["notes"] = notes

@@ -51,9 +51,11 @@ process UPD_VARIANT_CALL {
         ${bam} \\
     | bcftools call \\
         -m \\
+        -A \\
         --ploidy 2 \\
         -Ou \\
     | bcftools view \\
+        -e 'ALT="."' \\
         -v snps \\
         -m2 -M2 \\
         -Ou \\
