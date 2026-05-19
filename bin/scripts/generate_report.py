@@ -161,6 +161,7 @@ def aggregate_results(
     variant_report_json: Optional[str],
     multiqc_data_json: Optional[str],
     annotated_vcf: Optional[str] = None,
+    upd_report_json: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Aggregate all pipeline results into a single report."""
     logger.info("Aggregating results for sample: %s", sample_id)
@@ -179,6 +180,7 @@ def aggregate_results(
         "bam_qc": None,
         "fetal_fraction": None,
         "variant_analysis": None,
+        "upd_analysis": None,
     }
 
     # Load FASTQ QC
@@ -228,6 +230,20 @@ def aggregate_results(
         report["report_metadata"]["vep_annotated"] = True
     else:
         report["report_metadata"]["vep_annotated"] = False
+
+    # Load UPD analysis (optional, chr 6/7/11/14/15/16/20)
+    if upd_report_json and Path(upd_report_json).name != "NO_UPD_REPORT" \
+            and Path(upd_report_json).exists():
+        upd = load_json(upd_report_json)
+        if upd:
+            report["upd_analysis"] = upd
+            summary = (upd.get("summary_call") or "").strip()
+            if summary and summary not in ("normal", "INSUFFICIENT_INFORMATION"):
+                report["status_flags"].append(f"UPD_SUSPECTED:{summary}")
+                if report["overall_status"] == "PASS":
+                    report["overall_status"] = "WARNING"
+            elif summary == "INSUFFICIENT_INFORMATION":
+                report["status_flags"].append("UPD_INSUFFICIENT_INFO")
 
     # Final status determination
     if report["overall_status"] == "FAIL":
@@ -754,6 +770,67 @@ def generate_html_report(report: Dict[str, Any]) -> str:
 
         html_parts.append("    </div>\n")
 
+    # UPD Analysis Section (chr 6/7/11/14/15/16/20)
+    upd_data = report.get("upd_analysis")
+    if upd_data:
+        per_chrom = upd_data.get("per_chrom_upd", []) or []
+        summary_call = upd_data.get("summary_call", "normal")
+        summary_class = "pass" if summary_call in ("normal",) else (
+            "warn" if summary_call == "INSUFFICIENT_INFORMATION" else "fail")
+        html_parts.append(f"""
+    <div class="card">
+        <h2>UPD Analysis (chr 6/7/11/14/15/16/20)</h2>
+        <div class="metric-grid">
+            <div class="metric-box">
+                <div class="value {summary_class}">{summary_call}</div>
+                <div class="label">Summary Call</div>
+            </div>
+            <div class="metric-box">
+                <div class="value">{upd_data.get('fetal_fraction', 0):.1%}</div>
+                <div class="label">FF Used</div>
+            </div>
+            <div class="metric-box">
+                <div class="value">{len(per_chrom)}</div>
+                <div class="label">UPD Chromosomes</div>
+            </div>
+        </div>
+        <h3>Per-Chromosome Detail</h3>
+        <table>
+            <tr>
+                <th>Chrom</th><th>mat-het / mat-hom SNPs</th>
+                <th>BAF central frac</th><th>patUPD z</th>
+                <th>LLR matUPD-het / iso</th><th>Call</th><th>Clinical (mat / pat)</th>
+            </tr>
+""")
+        for r in per_chrom:
+            llr = r.get("llr_vs_normal", {}) or {}
+            baf = r.get("baf_summary", {}) or {}
+            mende = r.get("mat_hom_mende", {}) or {}
+            call = r.get("call", "normal")
+            row_style = ""
+            if call not in ("normal", "INSUFFICIENT_INFORMATION"):
+                row_style = ' style="background:#fff3e0;"'
+            clinical = r.get("clinical_note", {}) or {}
+            html_parts.append(f"""
+            <tr{row_style}>
+                <td>{r.get('chrom', '')}</td>
+                <td>{r.get('n_mat_het', 0)} / {r.get('n_mat_hom', 0)}</td>
+                <td>{baf.get('central_frac', 'N/A')}</td>
+                <td>{r.get('patupd_z', 'N/A')}</td>
+                <td>{llr.get('matupd_het', 0):.2f} / {llr.get('matupd_iso', 0):.2f}</td>
+                <td>{call}</td>
+                <td style="font-size:0.8em;">{clinical.get('maternal', '')} / {clinical.get('paternal', '')}</td>
+            </tr>
+""")
+        html_parts.append("""        </table>
+        <p style="font-size:0.85em;color:#666;margin-top:8px;">
+            UPD detection uses cfDNA-only signal: BAF distribution at maternal-het SNPs
+            and Mendelian-error excess at maternal-hom SNPs.  patUPD-het is the
+            hardest scenario from cfDNA alone — a "normal" call here does not exclude it.
+        </p>
+    </div>
+""")
+
     # QC Summary Section
     fq_data  = report.get("fastq_qc")
     bam_data = report.get("bam_qc")
@@ -829,6 +906,13 @@ def main():
         help="VEP+ClinVar annotated fetal VCF (.vcf.gz); merged into clinical_findings.",
     )
 
+    # UPD detection JSON (chr 6/7/11/14/15/16/20)
+    parser.add_argument(
+        "--upd_report",
+        default=None,
+        help="UPD detection JSON (output of upd_detection.py); folded into report.",
+    )
+
     # PPTX template options (for daemon-triggered report generation)
     parser.add_argument("--template_dir", help="PPTX template directory")
     parser.add_argument("--report_json", help="Pre-built report JSON for PPTX generation")
@@ -859,6 +943,7 @@ def main():
         variant_report_json=args.variant_report,
         multiqc_data_json=args.multiqc_data,
         annotated_vcf=args.annotated_vcf,
+        upd_report_json=args.upd_report,
     )
 
     # Write JSON report

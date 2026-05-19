@@ -248,6 +248,36 @@ else
     log_warn "Gene list not found. Gene coverage validation will be skipped."
 fi
 
+# 6. UPD analysis BED — chr 6/7/11/14/15/16/20 gene-extended regions for UPD detection.
+#    Generate with bin/scripts/build_upd_regions_bed.py.
+UPD_BED=""
+UPD_DIR="${DATA_DIR}/upd"
+for f in "${UPD_DIR}"/upd_analysis_regions*.bed "${UPD_DIR}"/*.bed; do
+    [[ -f "$f" ]] && UPD_BED="$f" && break
+done
+UPD_BED_ARG=""
+if [[ -n "$UPD_BED" ]] && [[ -f "$UPD_BED" ]]; then
+    UPD_BED_ARG="--upd_bed ${UPD_BED}"
+    UPD_REGIONS=$(grep -c -v "^#\|^track\|^browser" "${UPD_BED}" 2>/dev/null || echo "0")
+    log_info "UPD BED        : ${UPD_BED} (${UPD_REGIONS} regions)"
+else
+    log_warn "UPD BED not found under ${UPD_DIR}/. UPD detection will be skipped."
+fi
+
+# 7. UPD common SNPs VCF — gnomAD/1000G common SNPs (MAF>=5%) restricted to UPD BED.
+#    If absent, UPD module uses ALL biallelic SNP sites in the BED (slightly noisier).
+UPD_COMMON_SNPS_VCF=""
+for f in "${UPD_DIR}"/common_snps*.vcf.gz "${UPD_DIR}"/*.maf05*.vcf.gz; do
+    [[ -f "$f" ]] && UPD_COMMON_SNPS_VCF="$f" && break
+done
+UPD_COMMON_SNPS_ARG=""
+if [[ -n "$UPD_COMMON_SNPS_VCF" ]] && [[ -f "$UPD_COMMON_SNPS_VCF" ]]; then
+    UPD_COMMON_SNPS_ARG="--upd_common_snps_vcf ${UPD_COMMON_SNPS_VCF}"
+    log_info "UPD common SNPs: ${UPD_COMMON_SNPS_VCF}"
+else
+    log_info "UPD common SNPs: (not provided — using all SNP sites in UPD BED)"
+fi
+
 update_progress "INIT" "BED files detected successfully"
 
 # ── Generate samplesheet (FASTQ mode) OR validate BAM samplesheet ────────────
@@ -362,6 +392,8 @@ NF_CMD="nextflow run ${PIPELINE_DIR}/main.nf \
     ${PROBES_ARG} \
     ${ZERO_PROBE_ARG} \
     ${GENE_LIST_ARG} \
+    ${UPD_BED_ARG} \
+    ${UPD_COMMON_SNPS_ARG} \
     --reference_fasta ${REF_FASTA} \
     --outdir ${NF_OUTDIR} \
     ${QC_THRESHOLDS_ARG} \

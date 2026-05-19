@@ -53,6 +53,9 @@ log.info """
   FF SNPs BED       : ${params.ff_snps_bed ?: 'using target_bed'}
   Zero-probe BED    : ${params.zero_probe_bed ?: 'not provided'}
   Gene list         : ${params.gene_list ?: 'not provided'}
+  UPD analysis      : ${params.run_upd ? 'ENABLED (chr 6/7/11/14/15/16/20)' : 'DISABLED'}
+  UPD BED           : ${params.upd_bed ?: 'not provided'}
+  UPD common SNPs   : ${params.upd_common_snps_vcf ?: 'not provided (noisier)'}
   Reference         : ${params.reference_fasta}
   Aligner           : ${BAM_MODE ? 'N/A (BAM mode)' : 'bwa-mem2 (fixed)'}
   Variant caller    : bcftools (fixed)
@@ -72,6 +75,7 @@ include { COLLECT_FRAGMENT_SIZES; SAMTOOLS_IDXSTATS;
           ESTIMATE_FETAL_FRACTION }                                     from './modules/fetal_fraction'
 include { VARIANT_CALL_TARGET; FILTER_VARIANTS;
           VARIANT_ANALYSIS }                                           from './modules/variant_calling'
+include { UPD_VARIANT_CALL; UPD_DETECT }                               from './modules/upd_detection'
 include { VEP_ANNOTATION }                                             from './modules/annotation'
 include { GENERATE_REPORT }                                            from './modules/reporting'
 
@@ -127,6 +131,8 @@ workflow {
     //   FASTQ mode → full FASTP → alignment → dedup → extract pipeline.
     //
     def ch_bam        // tuple(sample_id, bam, bai) entering BAM QC / FF / variant calling
+    def ch_bam_full   // tuple(sample_id, bam, bai) — pre-target-extract (used by UPD module
+                     //                                so off-target chrom regions remain visible)
     def ch_fastq_qc   // tuple(sample_id, fastq_qc_json) for GENERATE_REPORT
     def ch_multiqc_fastp = Channel.empty()   // FASTP JSON; empty in BAM mode
 
@@ -140,6 +146,12 @@ workflow {
             .fromPath(params.input_bam)
             .splitCsv(header: true, sep: ',')
             .map { row -> tuple(row.sample_id, file(row.bam), file(row.bai)) }
+
+        // BAM-mode: no separate "full" BAM — the supplied BAM is used as-is for both
+        // panel and UPD analysis.  If the supplied BAM was already extracted to the
+        // panel target only, UPD calls outside the panel target footprint will simply
+        // have no informative reads (and the UPD module flags INSUFFICIENT_INFORMATION).
+        ch_bam_full = ch_bam
 
         // Mock FASTQ QC JSON — produces a placeholder JSON so GENERATE_REPORT
         // receives a consistent input tuple even without FASTQ preprocessing data.
@@ -175,6 +187,15 @@ workflow {
         ch_bam = join_bam_bai(
             EXTRACT_TARGET_READS.out.target_bam,
             EXTRACT_TARGET_READS.out.target_bai,
+        )
+
+        // Keep the pre-extract dedup BAM around for UPD analysis: extending the
+        // panel BED to gene loci + flanking pulls in regions outside the panel
+        // target footprint, so we need reads that EXTRACT_TARGET_READS would
+        // otherwise have discarded.
+        ch_bam_full = join_bam_bai(
+            MARK_DUPLICATES.out.dedup_bam,
+            MARK_DUPLICATES.out.dedup_bai,
         )
     }
 
@@ -245,6 +266,36 @@ workflow {
     )
 
     // ══════════════════════════════════════════════════════════════════════
+    // STEP 8a: UPD Detection (chr 6/7/11/14/15/16/20)  [optional]
+    // ══════════════════════════════════════════════════════════════════════
+    //  Operates on the pre-extract dedup BAM (ch_bam_full) so reads outside
+    //  the panel target footprint (gene introns + flanking) are visible.
+    //  Skipped if `params.run_upd = false` or no `params.upd_bed` provided.
+    def ch_upd_report = Channel.empty()
+    if (params.run_upd && params.upd_bed) {
+        ch_upd_bed         = Channel.fromPath(params.upd_bed)
+        ch_upd_common_snps = params.upd_common_snps_vcf
+            ? Channel.fromPath(params.upd_common_snps_vcf)
+            : Channel.of(file('NO_COMMON_SNPS'))
+
+        UPD_VARIANT_CALL(
+            ch_bam_full,
+            ch_upd_bed.first(),
+            ch_ref_fasta.first(),
+            ch_ref_fai.first(),
+        )
+        UPD_DETECT(
+            UPD_VARIANT_CALL.out.upd_vcf,
+            ESTIMATE_FETAL_FRACTION.out.ff_json,
+            ch_upd_bed.first(),
+            ch_upd_common_snps.first(),
+        )
+        ch_upd_report = UPD_DETECT.out.upd_report
+    } else if (params.run_upd && !params.upd_bed) {
+        log.warn 'run_upd=true but upd_bed not provided — UPD step skipped.'
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
     // STEP 8b: VEP + ClinVar Annotation on fetal-only VCF
     // ══════════════════════════════════════════════════════════════════════
     //  skip_vep = false (default, recommended):
@@ -270,12 +321,23 @@ workflow {
     // ══════════════════════════════════════════════════════════════════════
     // STEP 9: Report Generation
     // ══════════════════════════════════════════════════════════════════════
+    //  UPD JSON is fed in as an optional 6th channel; if UPD step was skipped
+    //  the report process receives a per-sample placeholder so the join works.
+    def ch_upd_for_report = ch_upd_report
+        .ifEmpty { return Channel.empty() }
+    if (!(params.run_upd && params.upd_bed)) {
+        ch_upd_for_report = ch_bam.map { sample_id, _bam, _bai ->
+            tuple(sample_id, file('NO_UPD_REPORT'))
+        }
+    }
+
     GENERATE_REPORT(
         ch_fastq_qc,
         BAM_QC_EVALUATE.out.bam_qc_json,
         ESTIMATE_FETAL_FRACTION.out.ff_json,
         VARIANT_ANALYSIS.out.variant_report,
         ch_annotated_vcf,
+        ch_upd_for_report,
     )
 
     // ══════════════════════════════════════════════════════════════════════

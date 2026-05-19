@@ -16,13 +16,15 @@ process GENERATE_REPORT {
     tuple val(sample_id), path(ff_json)
     tuple val(sample_id), path(variant_report_json)
     tuple val(sample_id),      path(annotated_vcf)
+    tuple val(sample_id),      path(upd_report_json)
 
     output:
     tuple val(sample_id), path("${sample_id}_final_report.json"), emit: report_json
     tuple val(sample_id), path("${sample_id}_final_report.html"), emit: report_html
 
     script:
-    def ann_arg = (annotated_vcf.name != 'NO_ANNOTATED_VCF') ? "--annotated_vcf ${annotated_vcf}" : ""
+    def ann_arg = (annotated_vcf.name  != 'NO_ANNOTATED_VCF') ? "--annotated_vcf ${annotated_vcf}" : ""
+    def upd_arg = (upd_report_json.name != 'NO_UPD_REPORT')   ? "--upd_report ${upd_report_json}"  : ""
     """
     export HOME=\$PWD
     python3 ${projectDir}/scripts/generate_report.py \\
@@ -32,6 +34,7 @@ process GENERATE_REPORT {
         --fetal_fraction ${ff_json} \\
         --variant_report ${variant_report_json} \\
         ${ann_arg} \\
+        ${upd_arg} \\
         --output_dir . \\
         --output_prefix ${sample_id}
     """
