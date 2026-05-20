@@ -199,9 +199,19 @@ def build_sample_result(sample_id: str, output_dir: Path) -> Dict[str, Any]:
     else:
         result["variant_analysis"] = None
 
-    # Final report path
+    # Final report path + pull UPD analysis from it
     if files["final_report"]:
         result["final_report_path"] = str(files["final_report"])
+        final_data = load_json_safe(files["final_report"])
+        if final_data:
+            upd = final_data.get("upd_analysis")
+            if upd:
+                result["upd_analysis"] = upd
+                summary = (upd.get("summary_call") or "").strip()
+                if summary and summary not in ("normal", "INSUFFICIENT_INFORMATION", ""):
+                    result["status_flags"].append(f"UPD_SUSPECTED:{summary}")
+                elif summary == "INSUFFICIENT_INFORMATION":
+                    result["status_flags"].append("UPD_INSUFFICIENT_INFO")
 
     # Determine overall status
     if "FF_ESTIMATION_FAILED" in result["status_flags"]:
@@ -210,6 +220,8 @@ def build_sample_result(sample_id: str, output_dir: Path) -> Dict[str, Any]:
         result["status"] = "WARNING"
     elif "PATHOGENIC_VARIANT_DETECTED" in result["status_flags"]:
         result["status"] = "POSITIVE"
+    elif any(f.startswith("UPD_SUSPECTED:") for f in result["status_flags"]):
+        result["status"] = "WARNING"
     elif "LOW_FETAL_FRACTION" in result["status_flags"]:
         result["status"] = "WARNING"
     else:
