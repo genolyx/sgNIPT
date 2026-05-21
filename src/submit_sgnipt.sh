@@ -95,23 +95,25 @@ fi
 EXISTING=$(curl -sf "${DAEMON_URL}/order/${ORDER_ID}/status" 2>/dev/null || echo "null")
 EXISTING_STATUS=$(echo "$EXISTING" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null || echo "")
 
-if [[ -n "$EXISTING_STATUS" && "$EXISTING_STATUS" != "FAILED" && "$EXISTING_STATUS" != "CANCELLED" && "$EXISTING_STATUS" != "COMPLETED" && "$EXISTING_STATUS" != "REPORT_READY" && "$EXISTING_STATUS" != "SAVED" ]]; then
-    echo "[WARN] Order ${ORDER_ID} already exists with status: ${EXISTING_STATUS}"
-    echo "       Use --fresh or wait for completion."
-    exit 1
+if [[ -n "$EXISTING_STATUS" ]]; then
+    if [[ "$EXISTING_STATUS" == "RUNNING" || "$EXISTING_STATUS" == "QUEUED" || "$EXISTING_STATUS" == "UPLOADING" ]]; then
+        echo "[WARN] Order ${ORDER_ID} is currently ${EXISTING_STATUS}. Stop it first."
+        exit 1
+    fi
+    # Delete old order so it is re-saved with fresh paths (work_id, output_dir etc.)
+    # This prevents stale path reuse from previous runs with different config.
+    echo "[INFO] Removing old order ${ORDER_ID} (status: ${EXISTING_STATUS}) to re-register with fresh paths ..."
+    DEL_RESP=$(curl -sf -X POST "${DAEMON_URL}/order/${ORDER_ID}/delete-run" 2>/dev/null || echo "{}")
+    echo "[INFO] Delete response: $DEL_RESP"
 fi
 
-# ── Save order (or re-use existing) ──────────────────────────────────────────
-if [[ -z "$EXISTING_STATUS" ]]; then
-    echo "[INFO] Saving order ${ORDER_ID} ..."
-    SAVE_RESP=$(curl -sf -X POST \
-        -H "Content-Type: application/json" \
-        -d "$BODY" \
-        "${DAEMON_URL}/order/sgnipt/save")
-    echo "[INFO] Save response: $SAVE_RESP"
-else
-    echo "[INFO] Re-using existing order ${ORDER_ID} (status: ${EXISTING_STATUS})"
-fi
+# ── Save order ────────────────────────────────────────────────────────────────
+echo "[INFO] Saving order ${ORDER_ID} ..."
+SAVE_RESP=$(curl -sf -X POST \
+    -H "Content-Type: application/json" \
+    -d "$BODY" \
+    "${DAEMON_URL}/order/sgnipt/save")
+echo "[INFO] Save response: $SAVE_RESP"
 
 # ── Start (queue) the order ───────────────────────────────────────────────────
 START_BODY="{\"fresh\": $FRESH}"
