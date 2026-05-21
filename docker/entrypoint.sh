@@ -461,6 +461,11 @@ if [[ $NF_EXIT_CODE -eq 0 ]]; then
     else
         log_info "Result JSON generated: ${RESULT_JSON}"
         update_progress "RESULTS" "Result JSON generated"
+        # Keep a fixed-name alias so legacy portals/daemons that look for
+        # "result.json" always see the latest result (overwrite any stale copy).
+        ln -sf "$(basename "${RESULT_JSON}")" "${ORDER_OUTPUT_DIR}/result.json" \
+            || cp -f "${RESULT_JSON}" "${ORDER_OUTPUT_DIR}/result.json"
+        log_info "result.json → $(basename "${RESULT_JSON}")"
     fi
 
     # ── Generate output TAR archive ──────────────────────────────────────
