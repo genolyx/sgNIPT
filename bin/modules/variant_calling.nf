@@ -47,6 +47,7 @@ process VARIANT_CALL_TARGET {
     | bcftools call \\
         -m \\
         --ploidy 2 \\
+        -A \\
         -Ou \\
     | bcftools view \\
         -i 'ALT!="."' \\
