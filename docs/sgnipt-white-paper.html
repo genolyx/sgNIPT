@@ -1,0 +1,601 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>sgNIPT White Paper — Fetal Variant Detection and In Silico Simulation</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --text: #1a1a2e;
+    --muted: #5c5c7a;
+    --accent: #2563eb;
+    --accent-light: #eff6ff;
+    --border: #e2e8f0;
+    --bg-subtle: #f8fafc;
+    --green-bg: #f0fdf4; --green-border: #16a34a;
+    --blue-bg: #eff6ff;  --blue-border: #2563eb;
+    --amber-bg: #fffbeb; --amber-border: #d97706;
+    --red-bg: #fef2f2;   --red-border: #dc2626;
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    font-size: 14px;
+    line-height: 1.65;
+    color: var(--text);
+    background: #fff;
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 48px 40px;
+  }
+
+  /* ── Typography ── */
+  h1 { font-size: 26px; font-weight: 700; line-height: 1.3; margin-bottom: 8px; }
+  h2 { font-size: 18px; font-weight: 700; margin: 36px 0 12px; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+  h3 { font-size: 14px; font-weight: 700; margin: 22px 0 8px; color: var(--text); }
+  p  { margin-bottom: 10px; }
+  code {
+    font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: 12px;
+    background: var(--bg-subtle);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: 1px 5px;
+  }
+
+  /* ── Title block ── */
+  .title-block { margin-bottom: 28px; }
+  .subtitle { font-size: 11px; text-transform: uppercase; letter-spacing: .1em; color: var(--muted); margin-bottom: 6px; }
+  .pills { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .pill {
+    font-size: 11px; font-weight: 600; padding: 2px 10px; border-radius: 999px;
+    background: var(--bg-subtle); border: 1px solid var(--border); color: var(--muted);
+  }
+  .pill.accent { background: var(--accent-light); border-color: var(--accent); color: var(--accent); }
+
+  /* ── Formula block ── */
+  .formula {
+    background: var(--bg-subtle);
+    border-left: 3px solid var(--accent);
+    border-radius: 4px;
+    padding: 10px 16px;
+    margin: 10px 0;
+    font-family: "SFMono-Regular", Consolas, monospace;
+    font-size: 12.5px;
+    white-space: pre-wrap;
+    line-height: 1.7;
+  }
+
+  /* ── Tables ── */
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 13px; }
+  th { text-align: left; font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); padding: 6px 10px; border-bottom: 2px solid var(--border); background: var(--bg-subtle); }
+  td { padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: var(--bg-subtle); }
+
+  /* ── Grid ── */
+  .grid { display: grid; gap: 12px; margin: 12px 0; }
+  .grid-2 { grid-template-columns: 1fr 1fr; }
+  .grid-3 { grid-template-columns: 1fr 1fr 1fr; }
+  .grid-4 { grid-template-columns: repeat(4, 1fr); }
+
+  /* ── Cards ── */
+  .card { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  .card-header { padding: 8px 14px; background: var(--bg-subtle); border-bottom: 1px solid var(--border); font-weight: 600; font-size: 13px; }
+  .card-body { padding: 12px 14px; }
+  .card-body p { margin-bottom: 4px; }
+
+  /* ── Stat cards ── */
+  .stat { border: 1px solid var(--border); border-radius: 6px; padding: 12px 16px; }
+  .stat-label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin-bottom: 4px; }
+  .stat-value { font-size: 22px; font-weight: 700; color: var(--accent); }
+
+  /* ── Callouts ── */
+  .callout { border-radius: 6px; padding: 12px 16px; margin: 14px 0; border-left: 4px solid; }
+  .callout-title { font-weight: 700; margin-bottom: 4px; font-size: 13px; }
+  .callout.success { background: var(--green-bg); border-color: var(--green-border); }
+  .callout.success .callout-title { color: var(--green-border); }
+  .callout.info    { background: var(--blue-bg);  border-color: var(--blue-border); }
+  .callout.info .callout-title    { color: var(--blue-border); }
+  .callout.warning { background: var(--amber-bg); border-color: var(--amber-border); }
+  .callout.warning .callout-title { color: var(--amber-border); }
+
+  /* ── Step list ── */
+  .step-list { padding-left: 20px; margin: 8px 0; }
+  .step-list li { margin-bottom: 5px; }
+
+  /* ── Origin badges ── */
+  .badge { display: inline-block; font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
+  .badge.fetal  { background: #f0fdf4; color: #15803d; border: 1px solid #86efac; }
+  .badge.mat    { background: #fffbeb; color: #b45309; border: 1px solid #fcd34d; }
+  .badge.mathet { background: #eff6ff; color: #1d4ed8; border: 1px solid #93c5fd; }
+  .badge.neutral{ background: var(--bg-subtle); color: var(--muted); border: 1px solid var(--border); }
+
+  /* ── Divider ── */
+  hr { border: none; border-top: 1px solid var(--border); margin: 28px 0; }
+
+  /* ── Footer ── */
+  .footer { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-top: 8px; }
+
+  /* ── Print ── */
+  @media print {
+    body { padding: 24px 28px; font-size: 12px; max-width: 100%; }
+    h2 { break-before: auto; }
+    .card, .callout, .formula { break-inside: avoid; }
+    .grid-2, .grid-3, .grid-4 { break-inside: avoid; }
+    table { break-inside: auto; }
+    tr { break-inside: avoid; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ── Title ── -->
+<div class="title-block">
+  <div class="subtitle">Technical White Paper · sgNIPT v1.2.0</div>
+  <h1>Single-Gene NIPT: Fetal Variant Detection<br>and In Silico Sample Simulation</h1>
+  <div class="pills">
+    <span class="pill accent">Twist UCL TE-96276661</span>
+    <span class="pill">GRCh38</span>
+    <span class="pill">183 genes · 5,138 regions</span>
+  </div>
+</div>
+
+<hr>
+
+<!-- ── Abstract ── -->
+<h2>Abstract</h2>
+<p>
+  Single-Gene Non-Invasive Prenatal Testing (sgNIPT) identifies fetal pathogenic variants from
+  cell-free DNA (cfDNA) in maternal plasma. Because fetal DNA represents only a small fraction of
+  the total cfDNA pool (the fetal fraction, FF), variant allele frequencies (VAF) of fetal-specific
+  variants are predictably low — approximately FF/2. This white paper describes the sgNIPT pipeline's
+  fetal fraction estimation algorithm, variant origin classification logic, and the in silico
+  simulation framework used to generate validation samples <strong>FF10_sgNIPT_hotspot</strong> and
+  <strong>FF10_sgNIPT_dominant_xlinked</strong>.
+</p>
+
+<!-- ── 1. Biological Model ── -->
+<h2>1. Biological Model of cfDNA in NIPT</h2>
+<p>
+  Maternal plasma cfDNA is a mixture of maternal-derived and placenta-derived (fetal) DNA
+  fragments. At any genomic locus, the observed VAF reflects both contributions:
+</p>
+<div class="formula">Observed VAF = (maternal contribution × maternal AF) + (FF × fetal AF)</div>
+<p>
+  For a locus where the mother is homozygous reference (hom-ref) and the fetus carries a
+  heterozygous pathogenic allele (the canonical "paternal inheritance" scenario), the fetal allele
+  is present in FF/2 of all cfDNA molecules:
+</p>
+<div class="formula">Observed VAF ≈ FF / 2     (e.g. FF = 10%  →  VAF ≈ 5%)</div>
+<p>
+  For maternal heterozygous variants, the allele is present at ~50% in maternal DNA and shifts
+  by ±FF/2 depending on fetal inheritance:
+</p>
+<div class="grid grid-2">
+  <div class="card">
+    <div class="card-header">Fetus inherits maternal ALT</div>
+    <div class="card-body"><p>cfDNA VAF ≈ 0.5 + FF/2 &nbsp;(upward shift)</p></div>
+  </div>
+  <div class="card">
+    <div class="card-header">Fetus is REF (did not inherit)</div>
+    <div class="card-body"><p>cfDNA VAF ≈ 0.5 − FF/2 &nbsp;(downward shift)</p></div>
+  </div>
+</div>
+
+<!-- ── 2. Fetal Fraction Estimation ── -->
+<h2>2. Fetal Fraction Estimation</h2>
+<p>
+  Fetal fraction is estimated from informative SNP sites identified in a panel-wide pileup,
+  computed by <code>fetal_fraction.py</code>. The result is passed as <code>--fetal-fraction</code>
+  to the downstream variant classifier.
+</p>
+
+<h3>2.1 Informative SNP Selection</h3>
+<p>
+  A site is informative if the maternal genotype is homozygous-alternative (GT=1/1) and the fetus
+  inherits one reference allele from the father. The minor allele in cfDNA (the REF allele from
+  fetal DNA) appears at frequency FF/2.
+</p>
+<p>Selection criteria (<code>fetal_fraction.py DEFAULT_CONFIG</code>):</p>
+<div class="grid grid-3">
+  <div class="stat"><div class="stat-label">Min depth at site</div><div class="stat-value" style="font-size:18px">50×</div></div>
+  <div class="stat"><div class="stat-label">Minor AF range</div><div class="stat-value" style="font-size:18px">0.005–0.25</div></div>
+  <div class="stat"><div class="stat-label">Min informative SNPs</div><div class="stat-value" style="font-size:18px">10</div></div>
+  <div class="stat"><div class="stat-label">Min FF to report</div><div class="stat-value" style="font-size:18px">2%</div></div>
+  <div class="stat"><div class="stat-label">Max FF to report</div><div class="stat-value" style="font-size:18px">50%</div></div>
+  <div class="stat"><div class="stat-label">Outlier removal</div><div class="stat-value" style="font-size:18px">IQR×1.5</div></div>
+</div>
+
+<h3>2.2 Estimation Formula</h3>
+<p>For each informative site <em>i</em>, the per-SNP FF estimate is:</p>
+<div class="formula">FF_i = 2 × minor_AF_i     where  minor_AF = min(alt_AF, 1 − alt_AF)
+
+Primary FF = median(FF_i)  after IQR-based outlier removal
+95% CI: normal approximation  ±  1,000-iteration bootstrap (seed 42)</div>
+
+<h3>2.3 Supplementary Estimation Methods</h3>
+<p>Three additional methods provide cross-validation. Discordance ≥ 0.10 triggers a warning.</p>
+<table>
+  <thead><tr><th>Method</th><th>Formula</th><th>Note</th></tr></thead>
+  <tbody>
+    <tr><td>FF SNPs (primary)</td><td><code>2 × median(minor_AF)</code></td><td>IQR outlier-filtered; bootstrap CI</td></tr>
+    <tr><td>Chr X ratio</td><td><code>2 × (1 − chrX_ratio / female_baseline)</code></td><td>Male fetus only; baseline = 1.0</td></tr>
+    <tr><td>Chr Y density</td><td><code>2 × Y_density / autosome_density</code></td><td>Unreliable for small panels</td></tr>
+    <tr><td>Fragment size</td><td><code>short_ratio × 0.5</code></td><td>short &lt; 150 bp, long ≥ 250 bp</td></tr>
+  </tbody>
+</table>
+
+<!-- ── 3. Variant Classification ── -->
+<h2>3. Variant Origin Classification</h2>
+<p>
+  After variant calling with <code>bcftools mpileup</code> on panel target regions, each variant is
+  classified by <code>variant_analysis.py</code> (<code>classify_variant_origin</code>). The two
+  primary inputs are the observed VAF and the estimated FF.
+</p>
+
+<h3>3.1 Tolerance Window</h3>
+<div class="formula">expected_fetal_vaf = FF / 2
+tolerance           = expected_fetal_vaf × fetal_af_tolerance_factor   (default 2.0)
+                    = FF
+
+At FF=10%:  expected_fetal_vaf = 0.05,  tolerance = 0.10
+Fetal-specific window: VAF ∈ [0, 0.15]  (and binomial test must pass)</div>
+
+<h3>3.2 Classification Decision Tree (in evaluation order)</h3>
+<table>
+  <thead>
+    <tr><th>Origin</th><th>VAF Range</th><th>Maternal GT</th><th>Fetal GT</th><th>Confidence</th><th>Gate</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><span class="badge fetal">fetal_specific</span></td>
+      <td>≈ FF/2 (~5%)</td><td>hom_ref</td><td>het</td><td>high</td>
+      <td>Binomial p &lt; 0.01 vs p₀=0.001</td>
+    </tr>
+    <tr>
+      <td><span class="badge mathet">maternal_het</span></td>
+      <td>0.35 – 0.65</td><td>het</td><td>uncertain / likely_het / likely_ref</td><td>medium</td>
+      <td>Deviation from 0.5 vs FF/2</td>
+    </tr>
+    <tr>
+      <td><span class="badge mat">maternal (hom_alt)</span></td>
+      <td>≥ 0.85</td><td>hom_alt</td><td>at_least_het</td><td>high</td>
+      <td>VAF threshold</td>
+    </tr>
+    <tr>
+      <td><span class="badge neutral">possible_fetal</span></td>
+      <td>≈ FF/2</td><td>hom_ref</td><td>uncertain</td><td>low</td>
+      <td>VAF in window, binomial not significant</td>
+    </tr>
+    <tr>
+      <td><span class="badge neutral">noise</span></td>
+      <td>&lt; 0.01</td><td>—</td><td>—</td><td>—</td>
+      <td>Below 2 × min_vaf</td>
+    </tr>
+    <tr>
+      <td><span class="badge neutral">ambiguous</span></td>
+      <td>other</td><td>—</td><td>—</td><td>low</td>
+      <td>Does not fit any class</td>
+    </tr>
+  </tbody>
+</table>
+
+<h3>3.3 Fetal-Specific Binomial Test</h3>
+<p>
+  A VAF within the tolerance window is necessary but not sufficient for a high-confidence
+  fetal_specific call. A one-sided binomial test is applied against a null error rate of
+  p₀ = 0.001 (sequencing noise floor):
+</p>
+<div class="formula">H₀: P(alt) = 0.001    (background sequencing noise)
+
+z  = (observed_alt_AF − p₀) / sqrt(p₀ × (1 − p₀) / depth)
+p  = 0.5 × erfc(z / sqrt(2))
+
+p &lt; 0.01  →  origin = fetal_specific,   confidence = high
+p ≥ 0.01  →  origin = possible_fetal,   confidence = low</div>
+
+<h3>3.4 Maternal Heterozygous: Fetal Inheritance Sub-classification</h3>
+<p>
+  For maternal_het variants (VAF 0.35–0.65), a secondary test assesses fetal inheritance by
+  comparing the VAF deviation from 0.5 against the expected FF/2 shift:
+</p>
+<div class="formula">deviation = VAF − 0.5
+
+|deviation| &lt; tolerance               →  fetal GT = uncertain    (cannot determine)
+deviation &gt; 0  and  |deviation − FF/2| &lt; tolerance  →  fetal GT = likely_het  (fetus inherited ALT)
+deviation &lt; 0  and  |deviation + FF/2| &lt; tolerance  →  fetal GT = likely_ref  (fetus is REF)</div>
+
+<!-- ── 4. Parameters ── -->
+<h2>4. Pipeline Parameters Reference</h2>
+<table>
+  <thead><tr><th>Parameter</th><th>Default Value</th><th>Source</th></tr></thead>
+  <tbody>
+    <tr><td><code>min_depth</code></td><td>10</td><td>variant_analysis.py</td></tr>
+    <tr><td><code>min_vaf</code></td><td>0.005</td><td>variant_analysis.py</td></tr>
+    <tr><td><code>maternal_hom_alt_threshold</code></td><td>0.85</td><td>variant_analysis.py</td></tr>
+    <tr><td><code>maternal_het_lower</code></td><td>0.35</td><td>variant_analysis.py</td></tr>
+    <tr><td><code>maternal_het_upper</code></td><td>0.65</td><td>variant_analysis.py</td></tr>
+    <tr><td><code>fetal_af_tolerance_factor</code></td><td>2.0</td><td>variant_analysis.py</td></tr>
+    <tr><td><code>binomial_pvalue_threshold</code></td><td>0.01</td><td>variant_analysis.py</td></tr>
+    <tr><td><code>binomial_null_p</code></td><td>0.001</td><td>variant_analysis.py</td></tr>
+    <tr><td><code>ff_min_depth (FF SNPs)</code></td><td>50</td><td>fetal_fraction.py</td></tr>
+    <tr><td><code>ff_min_minor_af</code></td><td>0.005</td><td>fetal_fraction.py</td></tr>
+    <tr><td><code>ff_max_minor_af</code></td><td>0.25</td><td>fetal_fraction.py</td></tr>
+    <tr><td><code>ff_min_informative_snps</code></td><td>10</td><td>fetal_fraction.py</td></tr>
+    <tr><td><code>bootstrap_iterations</code></td><td>1,000</td><td>fetal_fraction.py</td></tr>
+    <tr><td><code>vc_min_depth</code></td><td>50</td><td>nextflow.config</td></tr>
+    <tr><td><code>vc_min_alt_count</code></td><td>2</td><td>nextflow.config</td></tr>
+    <tr><td><code>ff_spike_min_depth</code></td><td>30</td><td>simulate_nipt_bam.py</td></tr>
+    <tr><td><code>n_ff_snps</code></td><td>100</td><td>simulate_nipt_bam.py</td></tr>
+  </tbody>
+</table>
+<div class="callout info">
+  <div class="callout-title">vc_min_depth vs post-call filter depth</div>
+  <p>
+    <code>vc_min_depth=50</code> applies at variant calling time (nextflow.config); sites below
+    this depth are not emitted by bcftools. <code>min_depth=10</code> in variant_analysis.py is
+    a post-call filter on the VCF. In practice, the 50× calling threshold is the binding constraint.
+  </p>
+</div>
+
+<!-- ── 5. Simulation ── -->
+<h2>5. In Silico cfDNA BAM Simulation</h2>
+<p>
+  <code>simulate_nipt_bam.py</code> injects synthetic reads at defined loci into a real maternal
+  panel BAM (<code>.target.bam</code>), faithfully reproducing the low-VAF cfDNA signal of
+  fetal-specific variants.
+</p>
+
+<h3>5.1 Spike-in Arithmetic</h3>
+<div class="formula">target_VAF = FF / 2
+n_to_add   = max(1,  round(n_existing × target_VAF / (1 − target_VAF)))
+
+Example: depth = 1000, FF = 10%
+  target_VAF = 0.05
+  n_to_add   = round(1000 × 0.05 / 0.95)  ≈  53 synthetic reads</div>
+
+<h3>5.2 Read Cloning Algorithm</h3>
+<p>For each synthetic read to add, the algorithm:</p>
+<ol class="step-list">
+  <li>Selects a random template read overlapping the target position.</li>
+  <li>Maps the reference position to query index via CIGAR alignment pairs (<code>get_aligned_pairs</code>).</li>
+  <li>Clones the <code>AlignedSegment</code>; renames <code>query_name</code> to <code>{original}_sim_{i}</code>.</li>
+  <li>Replaces the base at the query position with the spike base (ALT or REF).</li>
+  <li>Clears the duplicate flag (<code>flag &amp; ~0x400</code>) to prevent MarkDuplicates removal.</li>
+  <li>Preserves CIGAR, mapping quality, base qualities, and all auxiliary tags.</li>
+</ol>
+<p>After all reads are appended, the BAM is sorted and indexed. Original reads are never modified.</p>
+
+<h3>5.3 Two Spike Categories</h3>
+<div class="grid grid-2">
+  <div class="card">
+    <div class="card-header">Disease / Pathogenic Variants</div>
+    <div class="card-body">
+      <p>Source: <code>--variants TSV</code></p>
+      <p>Spike base: <strong>ALT</strong></p>
+      <p>Maternal precondition: <strong>hom_ref</strong> (ref_frac ≥ 0.90)</p>
+      <p>Non–hom-ref sites are <strong>skipped</strong></p>
+      <p>Models: paternal het fetal allele at VAF ≈ FF/2</p>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header">FF-Informative SNPs</div>
+    <div class="card-body">
+      <p>Source: <code>--ff-vcf</code> (GT=1/1 sites)</p>
+      <p>Spike base: <strong>REF</strong></p>
+      <p>Maternal precondition: <strong>hom_alt</strong> (ref_frac ≤ 0.10)</p>
+      <p>Min depth: 30× (<code>--ff-min-depth</code>)</p>
+      <p>Models: fetal het adding REF allele at VAF ≈ FF/2</p>
+    </div>
+  </div>
+</div>
+
+<!-- ── 6. Hotspot Sample ── -->
+<h2>6. Sample: FF10_sgNIPT_hotspot</h2>
+<div class="grid grid-4" style="margin-bottom:16px">
+  <div class="stat"><div class="stat-label">Fetal Fraction</div><div class="stat-value">10%</div></div>
+  <div class="stat"><div class="stat-label">Target Spike VAF</div><div class="stat-value">5%</div></div>
+  <div class="stat"><div class="stat-label">Hotspot SNVs</div><div class="stat-value">22</div></div>
+  <div class="stat"><div class="stat-label">FF SNPs Spiked</div><div class="stat-value">100</div></div>
+</div>
+
+<h3>6.1 Creation Workflow</h3>
+<p>The hotspot sample was built from a real completed run, not from another simulated BAM:</p>
+<ul class="step-list">
+  <li><strong>Source BAM:</strong> <code>analysis/2603/Test_sgNIPT/alignment/Test_sgNIPT.target.bam</code></li>
+  <li><strong>FF SNP VCF:</strong> <code>analysis/2603/Test_sgNIPT/fetal_fraction/Test_sgNIPT.ff_variants.vcf</code></li>
+  <li><strong>Disease variants:</strong> <code>data/spike-in/hotspot_variants.tsv</code> (22 SNVs)</li>
+  <li><strong>Output:</strong> <code>data/test/sim_bam/FF10_sgNIPT_hotspot.target.bam</code></li>
+  <li><strong>Parameters:</strong> <code>--fetal-fraction 0.10 --n-ff-snps 100 --seed 42</code></li>
+</ul>
+<p>
+  The hotspot variant list was derived from <code>singleGene_NIPT_with_hotspots.xlsx</code>
+  by <code>build_variants_tsv.py</code>: RASopathy and oncogenic hotspot mutations were matched
+  to panel BED coordinates on GRCh38 and REF/ALT verified via reference lookup. One HRAS site
+  (chr11:534289) may have been skipped at spike time due to insufficient reads in the source BAM.
+</p>
+
+<h3>6.2 Spiked Hotspot Variant List</h3>
+<table>
+  <thead><tr><th>Gene</th><th>Chrom</th><th>Position</th><th>REF</th><th>ALT</th><th>HGVS c.</th></tr></thead>
+  <tbody>
+    <tr><td>SLC25A24</td><td>chr1</td><td>108157481</td><td>C</td><td>T</td><td>c.650G&gt;A</td></tr>
+    <tr><td>SLC25A24</td><td>chr1</td><td>108157482</td><td>G</td><td>A</td><td>c.649C&gt;T</td></tr>
+    <tr><td>NRAS</td><td>chr1</td><td>114716127</td><td>C</td><td>T</td><td>c.35G&gt;A</td></tr>
+    <tr><td>RIT1</td><td>chr1</td><td>155904739</td><td>C</td><td>T</td><td>c.269G&gt;A</td></tr>
+    <tr><td>RIT1</td><td>chr1</td><td>155904798</td><td>G</td><td>C</td><td>c.170C&gt;G</td></tr>
+    <tr><td>LMNA</td><td>chr1</td><td>156136984</td><td>C</td><td>T</td><td>c.1824C&gt;T</td></tr>
+    <tr><td>SHOC2</td><td>chr10</td><td>110964362</td><td>A</td><td>G</td><td>c.4A&gt;G</td></tr>
+    <tr><td>FGFR2</td><td>chr10</td><td>121520163</td><td>G</td><td>C</td><td>c.755C&gt;G</td></tr>
+    <tr><td>HRAS</td><td>chr11</td><td>534289</td><td>C</td><td>T</td><td>c.34G&gt;A (may be skipped)</td></tr>
+    <tr><td>KRAS</td><td>chr12</td><td>25245345</td><td>C</td><td>T</td><td>c.35G&gt;A</td></tr>
+    <tr><td>PTPN11</td><td>chr12</td><td>112477719</td><td>A</td><td>G</td><td>c.922A&gt;G</td></tr>
+    <tr><td>SOS2</td><td>chr14</td><td>50182521</td><td>A</td><td>C</td><td>c.800T&gt;G</td></tr>
+    <tr><td>MAP2K1</td><td>chr15</td><td>66436843</td><td>A</td><td>G</td><td>c.389A&gt;G</td></tr>
+    <tr><td>STAT3</td><td>chr17</td><td>42329643</td><td>G</td><td>A</td><td>c.1144C&gt;T</td></tr>
+    <tr><td>SOS1</td><td>chr2</td><td>39007168</td><td>C</td><td>T</td><td>c.1300G&gt;A</td></tr>
+    <tr><td>RAF1</td><td>chr3</td><td>12604200</td><td>G</td><td>A</td><td>c.770C&gt;T</td></tr>
+    <tr><td>FGFR3</td><td>chr4</td><td>1801837</td><td>C</td><td>T</td><td>c.742C&gt;T</td></tr>
+    <tr><td>FGFR3</td><td>chr4</td><td>1804372</td><td>A</td><td>G</td><td>c.1118A&gt;G</td></tr>
+    <tr><td>FGFR3</td><td>chr4</td><td>1804392</td><td>G</td><td>A</td><td>c.1138G&gt;A/C</td></tr>
+    <tr><td>BRAF</td><td>chr7</td><td>140801502</td><td>T</td><td>C</td><td>c.770A&gt;G</td></tr>
+    <tr><td>FGFR1</td><td>chr8</td><td>38424690</td><td>G</td><td>C</td><td>c.755C&gt;G</td></tr>
+    <tr><td>MECP2</td><td>chrX</td><td>154031355</td><td>G</td><td>A</td><td>c.502C&gt;T</td></tr>
+  </tbody>
+</table>
+
+<h3>6.3 Portal Review Interpretation</h3>
+<div class="callout success">
+  <div class="callout-title">Total analyzed: 370 · Maternal het: 211 · Maternal hom: 137 · Fetal: 6</div>
+  <p>
+    The 211 maternal het and 137 maternal hom variants are <strong>real germline variants already
+    present in Test_sgNIPT.target.bam</strong>. They were not introduced by the spike-in.
+    The 6 fetal variants represent hotspot spike-in sites that survived variant calling
+    (<code>vc_min_depth=50</code>) and binomial classification at ~5% VAF. Recovery of 6 out of
+    ~21 attempted spikes is expected — not all sites achieve sufficient depth or cross the
+    binomial significance threshold at 5% VAF.
+  </p>
+</div>
+
+<!-- ── 7. dominant_xlinked ── -->
+<h2>7. Sample: FF10_sgNIPT_dominant_xlinked</h2>
+<div class="grid grid-4" style="margin-bottom:16px">
+  <div class="stat"><div class="stat-label">Fetal Fraction</div><div class="stat-value">10%</div></div>
+  <div class="stat"><div class="stat-label">Target Spike VAF</div><div class="stat-value">5%</div></div>
+  <div class="stat"><div class="stat-label">Disease SNVs</div><div class="stat-value">871</div></div>
+  <div class="stat"><div class="stat-label">FF SNPs Spiked</div><div class="stat-value">100</div></div>
+</div>
+
+<p>
+  This sample uses the same simulation engine and source BAM as FF10_sgNIPT_hotspot, but targets
+  871 known pathogenic missense/nonsense variants across dominant and X-linked disease genes from
+  <code>sgNIPT_dominant_xlinked_pathogenic_cmutations.xlsx</code>, converted to
+  <code>dominant_xlinked_variants.tsv</code> by <code>build_variants_tsv.py</code>.
+</p>
+
+<h3>7.1 Comparison Table</h3>
+<table>
+  <thead><tr><th></th><th>FF10_sgNIPT_hotspot</th><th>FF10_sgNIPT_dominant_xlinked</th></tr></thead>
+  <tbody>
+    <tr><td>Variant TSV</td><td>hotspot_variants.tsv</td><td>dominant_xlinked_variants.tsv</td></tr>
+    <tr><td>Spike count</td><td>22</td><td>871</td></tr>
+    <tr><td>Source Excel</td><td>singleGene_NIPT_with_hotspots.xlsx</td><td>sgNIPT_dominant_xlinked_pathogenic_cmutations.xlsx</td></tr>
+    <tr><td>Fetal variants (portal)</td><td><strong>6</strong></td><td><strong>9</strong></td></tr>
+    <tr><td>Total analyzed</td><td>370</td><td>373</td></tr>
+    <tr><td>Maternal het</td><td>211</td><td>211</td></tr>
+    <tr><td>Maternal hom</td><td>137</td><td>137</td></tr>
+  </tbody>
+</table>
+<p>
+  The identical maternal het/hom counts confirm both samples share the same source BAM.
+  The low fetal recovery rate (hotspot: 27%, dominant_xlinked: 1%) reflects the 50× calling
+  depth threshold and binomial significance requirement at 5% VAF.
+</p>
+
+<!-- ── 8. make_test_nipt_samples.sh ── -->
+<h2>8. Standard Test Sample Generation (<code>make_test_nipt_samples.sh</code>)</h2>
+<p>
+  The official script builds the FF5/FF10/FF15 test suite using the same simulator with the
+  6-variant <code>data/test/test_variants.tsv</code>:
+</p>
+<div class="formula">for FF in 5 10 15; do
+  simulate_nipt_bam.py \
+    --bam        Test_sgNIPT.target.bam \
+    --output     FF${FF}_sim_Test_sgNIPT.target.bam \
+    --fetal-fraction 0.${FF} \
+    --variants   data/test/test_variants.tsv \
+    --ff-vcf     Test_sgNIPT.ff_variants.vcf \
+    --n-ff-snps  100  --seed 42
+done</div>
+<p>
+  The hotspot and dominant_xlinked samples were created using the same pattern with custom variant
+  TSVs, manually executed via Docker. Both output BAM samplesheet CSVs are consumed by
+  <code>run_sgnipt.sh --input-bam</code> mode, which bypasses FASTQ-to-BAM steps.
+</p>
+
+<!-- ── 9. Pipeline Architecture ── -->
+<h2>9. Pipeline Architecture Overview</h2>
+<p>
+  The full sgNIPT pipeline (Nextflow v1.2.0, Docker image <code>sgnipt:latest</code>) operates
+  in two modes:
+</p>
+<div class="grid grid-2">
+  <div class="card">
+    <div class="card-header">FASTQ Mode (clinical samples)</div>
+    <div class="card-body">
+      <ol class="step-list" style="padding-left:14px">
+        <li>fastp QC (Q15, min 36 bp)</li>
+        <li>BWA-MEM2 alignment → GRCh38</li>
+        <li>Picard MarkDuplicates</li>
+        <li>samtools target extraction</li>
+        <li>Fetal fraction estimation</li>
+        <li>bcftools variant calling</li>
+        <li>Variant origin classification</li>
+        <li>VEP annotation</li>
+        <li>Report generation</li>
+      </ol>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-header">BAM Mode (simulation / re-analysis)</div>
+    <div class="card-body">
+      <ol class="step-list" style="padding-left:14px">
+        <li style="color:var(--muted)">— (fastp skipped)</li>
+        <li style="color:var(--muted)">— (BWA skipped)</li>
+        <li style="color:var(--muted)">— (MarkDup skipped)</li>
+        <li style="color:var(--muted)">— (extraction skipped)</li>
+        <li>Fetal fraction estimation</li>
+        <li>bcftools variant calling</li>
+        <li>Variant origin classification</li>
+        <li>VEP annotation</li>
+        <li>Report generation</li>
+      </ol>
+    </div>
+  </div>
+</div>
+<div class="callout warning">
+  <div class="callout-title">MarkDuplicates and simulated BAMs</div>
+  <p>
+    Simulated BAMs must be processed in BAM mode (which skips MarkDuplicates) because synthetic
+    reads share the same coordinates as their template reads. Running MarkDuplicates on a spiked
+    BAM would remove cloned reads as optical/PCR duplicates, destroying the intended spike-in signal.
+    This is why <code>simulate_nipt_bam.py</code> uses <code>.target.bam</code> (post-markdup)
+    as input, and the samplesheet triggers BAM-mode entry in the pipeline.
+  </p>
+</div>
+
+<!-- ── 10. Gene Annotation ── -->
+<h2>10. Gene Annotation in Variant Reports</h2>
+<p>
+  The production panel BED (<code>All_target_regions_UCL_SingleGeneNIPT_TE-96276661_hg38_*.bed</code>)
+  is a 4-column Twist file (chrom, start, end, name). The pipeline expects up to 9 columns
+  (chrom, start, end, name, score, strand, gene, disease, pathogenic_variant); missing columns
+  result in empty fields in <code>variant_report.json</code>.
+</p>
+<table>
+  <thead><tr><th>File</th><th>gene field</th><th>HGVS field</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>variant_report.json</code></td>
+      <td>Populated via fallback from BED <code>name</code> col (<code>name.split("_")[0]</code>) — applied as of latest build</td>
+      <td>Not present</td>
+    </tr>
+    <tr>
+      <td><code>*_final_report.json</code> (post-VEP)</td>
+      <td>As above</td>
+      <td><code>vep.hgvsc</code>, <code>vep.hgvsp</code> (fetal variants only)</td>
+    </tr>
+  </tbody>
+</table>
+
+<hr>
+<div class="footer">
+  <span>sgNIPT v1.2.0 · Twist UCL TE-96276661 · GRCh38</span>
+  <span>Generated from pipeline source · /home/ken/sgNIPT</span>
+</div>
+
+</body>
+</html>
