@@ -558,9 +558,13 @@ def annotate_with_targets(
             for t in target_lookup[chrom]:
                 if t["start"] <= pos <= t["end"]:
                     var["in_target"] = True
+                    name = t.get("name", "")
+                    gene = t.get("gene", "")
+                    if not gene and name:
+                        gene = name.split("_")[0].split(":")[0].split("|")[0]
                     var["target_info"] = {
-                        "name": t.get("name", ""),
-                        "gene": t.get("gene", ""),
+                        "name": name,
+                        "gene": gene,
                         "disease": t.get("disease", ""),
                         "pathogenic_variant": t.get("pathogenic_variant", ""),
                     }
