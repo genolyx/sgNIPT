@@ -369,7 +369,17 @@ log_info "============================================================"
 
 update_progress "PIPELINE" "Launching Nextflow pipeline"
 
-NF_LOG="${ORDER_LOG_DIR}/nextflow_${TIMESTAMP}.log"
+NF_LOG="${ORDER_LOG_DIR}/nextflow.log"
+
+# Rotate existing logs: nextflow.log → nextflow.log.1 → nextflow.log.2 …
+if [[ -f "${NF_LOG}" ]]; then
+    n=1
+    while [[ -f "${NF_LOG}.${n}" ]]; do (( n++ )); done
+    for (( i=n-1; i>=1; i-- )); do
+        mv "${NF_LOG}.${i}" "${NF_LOG}.$((i+1))"
+    done
+    mv "${NF_LOG}" "${NF_LOG}.1"
+fi
 
 # Run from ANALYSIS_DIR so .nextflow/ is writable (pipeline dir is root-owned in image)
 cd "${ANALYSIS_DIR}"
