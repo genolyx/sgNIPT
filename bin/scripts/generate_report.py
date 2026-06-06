@@ -162,6 +162,7 @@ def aggregate_results(
     multiqc_data_json: Optional[str],
     annotated_vcf: Optional[str] = None,
     upd_report_json: Optional[str] = None,
+    dark_gene_report_json: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Aggregate all pipeline results into a single report."""
     logger.info("Aggregating results for sample: %s", sample_id)
@@ -181,6 +182,7 @@ def aggregate_results(
         "fetal_fraction": None,
         "variant_analysis": None,
         "upd_analysis": None,
+        "dark_gene_analysis": None,
     }
 
     # Load FASTQ QC
@@ -244,6 +246,32 @@ def aggregate_results(
                     report["overall_status"] = "WARNING"
             elif summary == "INSUFFICIENT_INFORMATION":
                 report["status_flags"].append("UPD_INSUFFICIENT_INFO")
+
+    # Load Dark Gene CNV analysis (SMN1/2, HBA1/2, GBA1/GBAP1) [optional]
+    if dark_gene_report_json and \
+            Path(dark_gene_report_json).name != "NO_DARK_GENE_REPORT" \
+            and Path(dark_gene_report_json).exists():
+        dg = load_json(dark_gene_report_json)
+        if dg:
+            report["dark_gene_analysis"] = dg
+            dg_status = dg.get("overall_status", "")
+            if dg_status == "HIGH_RISK":
+                report["status_flags"].append("DARK_GENE_HIGH_RISK")
+                if report["overall_status"] == "PASS":
+                    report["overall_status"] = "WARNING"
+            elif dg_status == "MODERATE_RISK":
+                report["status_flags"].append("DARK_GENE_MODERATE_RISK")
+                if report["overall_status"] == "PASS":
+                    report["overall_status"] = "WARNING"
+            elif dg_status == "INDETERMINATE":
+                report["status_flags"].append("DARK_GENE_INDETERMINATE")
+            # Propagate per-region HIGH_RISK flags
+            for region in dg.get("regions", []):
+                risk = region.get("risk_classification", "")
+                gene = region.get("gene", "")
+                if risk == "HIGH_RISK":
+                    report["status_flags"].append(f"DARK_GENE_HIGH_RISK:{gene}")
+            logger.info("Dark gene analysis loaded — overall: %s", dg_status)
 
     # Final status determination
     if report["overall_status"] == "FAIL":
@@ -868,6 +896,53 @@ def generate_html_report(report: Dict[str, Any]) -> str:
 """)
         html_parts.append("    </div>\n")
 
+    # Dark Gene CNV Analysis section
+    dg = report.get("dark_gene_analysis")
+    if dg:
+        dg_status = dg.get("overall_status", "N/A")
+        dg_ff = dg.get("fetal_fraction", "N/A")
+        status_color = {
+            "NORMAL": "#28a745",
+            "LOW_RISK": "#fd7e14",
+            "MODERATE_RISK": "#dc3545",
+            "HIGH_RISK": "#721c24",
+            "INDETERMINATE": "#6c757d",
+        }.get(dg_status, "#6c757d")
+        html_parts.append(f"""
+    <div class="section">
+        <h2>Dark Gene CNV Analysis (SMN1/2 · HBA1/2 · GBA1)</h2>
+        <p style="color:{status_color};font-weight:bold;">Overall: {dg_status}</p>
+        <p style="font-size:0.85em;color:#555">{dg.get('caveat','')[:200]}...</p>
+        <table>
+            <tr>
+                <th>Gene</th><th>Disease</th><th>Obs. Ratio</th>
+                <th>Exp. Normal</th><th>Risk</th><th>Notes</th>
+            </tr>
+""")
+        for r in dg.get("regions", []):
+            risk = r.get("risk_classification", "")
+            row_color = {
+                "NORMAL": "",
+                "LOW_RISK": "background:#fff3cd",
+                "MODERATE_RISK": "background:#f8d7da",
+                "HIGH_RISK": "background:#f5c6cb;font-weight:bold",
+                "INDETERMINATE": "background:#d6d8d9",
+            }.get(risk, "")
+            smn_note = ""
+            if r.get("smn1_frac", 0) > 0:
+                smn_note = (f" [SMN1_frac={r['smn1_frac']:.3f}"
+                            f" depth={r.get('smn1_c840_depth',0)}]")
+            html_parts.append(f"""            <tr style="{row_color}">
+                <td>{r.get('gene','')}</td>
+                <td>{r.get('disease','')}</td>
+                <td>{r.get('observed_ratio','')}</td>
+                <td>{r.get('expected_ratio_normal','')}</td>
+                <td>{risk}</td>
+                <td style="font-size:0.8em">{r.get('interpretation_notes','')[:120]}{smn_note}</td>
+            </tr>
+""")
+        html_parts.append("        </table>\n    </div>\n")
+
     # Footer
     html_parts.append(f"""
     <div class="footer">
@@ -913,6 +988,13 @@ def main():
         help="UPD detection JSON (output of upd_detection.py); folded into report.",
     )
 
+    # Dark Gene CNV analysis JSON (SMN1/2, HBA1/2, GBA1/GBAP1)
+    parser.add_argument(
+        "--dark_gene_report",
+        default=None,
+        help="Dark gene CNV report JSON (output of dark_gene_nipt.py); folded into report.",
+    )
+
     # PPTX template options (for daemon-triggered report generation)
     parser.add_argument("--template_dir", help="PPTX template directory")
     parser.add_argument("--report_json", help="Pre-built report JSON for PPTX generation")
@@ -944,6 +1026,7 @@ def main():
         multiqc_data_json=args.multiqc_data,
         annotated_vcf=args.annotated_vcf,
         upd_report_json=args.upd_report,
+        dark_gene_report_json=args.dark_gene_report,
     )
 
     # Write JSON report

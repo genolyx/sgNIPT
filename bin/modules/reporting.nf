@@ -15,16 +15,18 @@ process GENERATE_REPORT {
     tuple val(sample_id), path(bam_qc_json)
     tuple val(sample_id), path(ff_json)
     tuple val(sample_id), path(variant_report_json)
-    tuple val(sample_id),      path(annotated_vcf)
-    tuple val(sample_id),      path(upd_report_json)
+    tuple val(sample_id), path(annotated_vcf)
+    tuple val(sample_id), path(upd_report_json)
+    tuple val(sample_id), path(dark_gene_json)
 
     output:
     tuple val(sample_id), path("${sample_id}_final_report.json"), emit: report_json
     tuple val(sample_id), path("${sample_id}_final_report.html"), emit: report_html
 
     script:
-    def ann_arg = (annotated_vcf.name  != 'NO_ANNOTATED_VCF') ? "--annotated_vcf ${annotated_vcf}" : ""
-    def upd_arg = (upd_report_json.name != 'NO_UPD_REPORT')   ? "--upd_report ${upd_report_json}"  : ""
+    def ann_arg       = (annotated_vcf.name   != 'NO_ANNOTATED_VCF')      ? "--annotated_vcf ${annotated_vcf}"    : ""
+    def upd_arg       = (upd_report_json.name != 'NO_UPD_REPORT')         ? "--upd_report ${upd_report_json}"     : ""
+    def dark_gene_arg = (dark_gene_json.name  != 'NO_DARK_GENE_REPORT')   ? "--dark_gene_report ${dark_gene_json}": ""
     """
     export HOME=\$PWD
     python3 ${projectDir}/scripts/generate_report.py \\
@@ -35,6 +37,7 @@ process GENERATE_REPORT {
         --variant_report ${variant_report_json} \\
         ${ann_arg} \\
         ${upd_arg} \\
+        ${dark_gene_arg} \\
         --output_dir . \\
         --output_prefix ${sample_id}
     """

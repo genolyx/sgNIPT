@@ -84,6 +84,7 @@ include { VARIANT_CALL_TARGET; FILTER_VARIANTS;
           VARIANT_ANALYSIS }                                           from './modules/variant_calling'
 include { UPD_VARIANT_CALL; UPD_DETECT }                               from './modules/upd_detection'
 include { VEP_ANNOTATION }                                             from './modules/annotation'
+include { DARK_GENE_CNV_ANALYSIS }                                     from './modules/dark_gene'
 include { GENERATE_REPORT }                                            from './modules/reporting'
 
 
@@ -275,7 +276,29 @@ workflow {
     )
 
     // ══════════════════════════════════════════════════════════════════════
-    // STEP 8a: UPD Detection (chr 6/7/11/14/15/16/20)  [optional]
+    // STEP 8a: Dark Gene CNV Analysis (SMN1/2, HBA1/2, GBA1)  [optional]
+    // ══════════════════════════════════════════════════════════════════════
+    //  Operates on the pre-extract dedup BAM (ch_bam_full) — same rationale
+    //  as UPD: reads outside the panel footprint must be visible for
+    //  SMN1/SMN2 region coverage and c.840 pileup analysis.
+    //  Enabled by default when dark_gene_bed is provided.
+    ch_dark_gene_report = Channel.empty()
+    if (params.run_dark_gene && params.dark_gene_bed) {
+        ch_dark_gene_bed = Channel.fromPath(params.dark_gene_bed)
+        DARK_GENE_CNV_ANALYSIS(
+            ch_bam_full,
+            ESTIMATE_FETAL_FRACTION.out.ff_json,
+            ch_dark_gene_bed.first(),
+            ch_ref_fasta.first(),
+            ch_ref_fai.first(),
+        )
+        ch_dark_gene_report = DARK_GENE_CNV_ANALYSIS.out.dark_gene_json
+    } else if (params.run_dark_gene && !params.dark_gene_bed) {
+        log.warn 'run_dark_gene=true but dark_gene_bed not provided — Dark Gene step skipped.'
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // STEP 8b: UPD Detection (chr 6/7/11/14/15/16/20)  [optional]
     // ══════════════════════════════════════════════════════════════════════
     //  Operates on the pre-extract dedup BAM (ch_bam_full) so reads outside
     //  the panel target footprint (gene introns + flanking) are visible.
@@ -340,6 +363,15 @@ workflow {
         }
     }
 
+    // Dark gene report placeholder when step is skipped
+    ch_dark_gene_for_report = ch_dark_gene_report
+        .ifEmpty { return Channel.empty() }
+    if (!(params.run_dark_gene && params.dark_gene_bed)) {
+        ch_dark_gene_for_report = ch_bam.map { sample_id, _bam, _bai ->
+            tuple(sample_id, file('NO_DARK_GENE_REPORT'))
+        }
+    }
+
     GENERATE_REPORT(
         ch_fastq_qc,
         BAM_QC_EVALUATE.out.bam_qc_json,
@@ -347,6 +379,7 @@ workflow {
         VARIANT_ANALYSIS.out.variant_report,
         ch_annotated_vcf,
         ch_upd_for_report,
+        ch_dark_gene_for_report,
     )
 
     // ══════════════════════════════════════════════════════════════════════
