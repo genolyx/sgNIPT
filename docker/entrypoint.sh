@@ -410,17 +410,17 @@ NF_CMD="nextflow run ${PIPELINE_DIR}/main.nf \
     ${ANNOTATION_ARGS} \
     ${EXTRA_NF_ARGS} \
     -work-dir ${WORK_DIR} \
-    -with-trace ${ORDER_LOG_DIR}/trace.txt \
-    -with-timeline ${ORDER_LOG_DIR}/timeline.html \
-    -with-report ${ORDER_LOG_DIR}/report.html \
-    -with-dag ${ORDER_LOG_DIR}/dag.html \
+    -with-trace \"${ORDER_LOG_DIR}/trace.txt\" \
+    -with-timeline \"${ORDER_LOG_DIR}/timeline.html\" \
+    -with-report \"${ORDER_LOG_DIR}/report.html\" \
+    -with-dag \"${ORDER_LOG_DIR}/dag.html\" \
     -ansi-log false"
 
 log_info "Command: ${NF_CMD}"
 log_info "Log file: ${NF_LOG}"
 
-# Execute
-eval ${NF_CMD} 2>&1 | tee "${NF_LOG}"
+# Execute — eval with quoted NF_CMD so paths containing () are not parsed as subshells
+eval "${NF_CMD}" 2>&1 | tee "${NF_LOG}"
 NF_EXIT_CODE=${PIPESTATUS[0]}
 
 # ── Post-execution ───────────────────────────────────────────────────────────

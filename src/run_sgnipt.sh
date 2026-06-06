@@ -230,11 +230,31 @@ if [[ -z "$ORDER_ID" ]]; then
     exit 1
 fi
 
-# Docker container NAME must be order_id so `docker ps -a` and nipt-daemon (`docker ps -f name=<order_id>`) work.
-if [[ ! "${ORDER_ID}" =~ ^[a-zA-Z0-9][a-zA-Z0-9_.-]*$ ]]; then
-    echo "[ERROR] --order_id must be a valid Docker container name: [a-zA-Z0-9][a-zA-Z0-9_.-]*"
-    echo "  Got: ${ORDER_ID}"
-    exit 1
+# ORDER_ID drives on-disk paths (may contain parentheses etc.). Docker --name must not.
+_sanitize_docker_name() {
+    local raw="$1"
+    local name
+    name="$(printf '%s' "$raw" | sed -e 's/[^a-zA-Z0-9_.-]/-/g' -e 's/^[-_.]*//' -e 's/^$/sgnipt-unknown/')"
+    printf '%s' "${name:0:200}"
+}
+
+CONTAINER_NAME="$(_sanitize_docker_name "$ORDER_ID")"
+if [[ "$CONTAINER_NAME" != "$ORDER_ID" ]]; then
+    echo "[INFO] Docker container name: ${CONTAINER_NAME} (order_id=${ORDER_ID})"
+fi
+
+# Sanitize SAMPLE_NAMES for Nextflow process identifiers.
+# Nextflow embeds sample_id unquoted into .command.sh scripts; special chars like
+# parentheses cause bash syntax errors.  Replace anything outside [a-zA-Z0-9_.-] with '_'.
+# ORDER_ID (and on-disk paths) are unchanged — only the Nextflow sample_id column differs.
+_sanitize_sample_id() {
+    local raw="$1"
+    printf '%s' "$raw" | sed 's/[^a-zA-Z0-9_.-]/_/g'
+}
+_SAMPLE_NAMES_ORIG="${SAMPLE_NAMES}"
+SAMPLE_NAMES="$(_sanitize_sample_id "$SAMPLE_NAMES")"
+if [[ "$SAMPLE_NAMES" != "$_SAMPLE_NAMES_ORIG" ]]; then
+    echo "[INFO] Sample names sanitized for Nextflow: ${_SAMPLE_NAMES_ORIG} → ${SAMPLE_NAMES}"
 fi
 
 # ── BAM mode vs FASTQ mode ──────────────────────────────────────────────────
@@ -355,9 +375,7 @@ fi
 SGNIPT_NO_RESUME="${SGNIPT_NO_RESUME:-0}"
 [[ -n "$FRESH" ]] && SGNIPT_NO_RESUME="1"
 
-# ── Container name = ORDER_ID (daemon uses docker ps -f name=ORDER_ID) ──────
-CONTAINER_NAME="${ORDER_ID}"
-
+# ── Container name (sanitized); label keeps real order_id for lookup ─────────
 # Remove existing container with same name (if any)
 if docker ps -a --format '{{.Names}}' | grep -q "^${CONTAINER_NAME}$"; then
     echo "[WARN] Removing existing container: ${CONTAINER_NAME}"
@@ -384,6 +402,15 @@ fi
 DOCKER_GROUP_ARGS=()
 if DOCKER_SOCK_GID="$(getent group docker 2>/dev/null | cut -d: -f3)" && [[ -n "${DOCKER_SOCK_GID}" ]]; then
     DOCKER_GROUP_ARGS=(--group-add "${DOCKER_SOCK_GID}")
+fi
+
+# 1-E: Extra volume mounts for FASTQ symlink targets outside HOST_FASTQ_DIR.
+# Set SGNIPT_FASTQ_EXTRA_VOLUME="<host_path>:<host_path>:ro" when FASTQ files live under
+# a different tree (e.g. /home/ken/gx-exome/fastq) and HOST_FASTQ_DIR contains only symlinks.
+# Pattern mirrors run_analysis.sh INPUT_BAM_MOUNT_ARGS.
+EXTRA_FASTQ_VOL_ARGS=()
+if [[ -n "${SGNIPT_FASTQ_EXTRA_VOLUME:-}" ]]; then
+    EXTRA_FASTQ_VOL_ARGS=(-v "${SGNIPT_FASTQ_EXTRA_VOLUME}")
 fi
 
 # ── Launch Docker container ──────────────────────────────────────────────────
@@ -438,6 +465,8 @@ COMMON_DOCKER_ARGS=(
     -e BCFTOOLS="bcftools"
     -e PYTHON3="python3"
     -v "${HOST_FASTQ_DIR}:/Work/SgNIPT/fastq"
+    -v "${HOST_FASTQ_DIR}:${HOST_FASTQ_DIR}:ro"
+    "${EXTRA_FASTQ_VOL_ARGS[@]}"
     -v "${HOST_DATA_DIR}:/Work/SgNIPT/data"
     -v "${HOST_CONFIG_DIR}:/Work/SgNIPT/config"
     -v "${ORDER_ANALYSIS_HOST}:/Work/SgNIPT/analysis"
