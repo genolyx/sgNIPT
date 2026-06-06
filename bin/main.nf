@@ -289,6 +289,7 @@ workflow {
             ch_bam_full,
             ESTIMATE_FETAL_FRACTION.out.ff_json,
             ch_dark_gene_bed.first(),
+            ch_target_bed.first(),
             ch_ref_fasta.first(),
             ch_ref_fai.first(),
         )

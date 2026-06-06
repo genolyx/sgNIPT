@@ -173,37 +173,116 @@ def samtools_idxstats(bam_path: str) -> Dict[str, Tuple[int, int]]:
 def compute_autosome_background_depth(
     bam_path: str,
     exclude_chroms: Optional[List[str]] = None,
-    bed_path: Optional[str] = None,
+    target_bed: Optional[str] = None,
 ) -> float:
     """
-    Compute mean depth across autosomes using samtools idxstats.
-    Exclude sex chromosomes and any explicitly listed regions.
-    Uses mapped_reads / chrom_length as approximate mean depth proxy.
-    """
-    stats = samtools_idxstats(bam_path)
-    skip = {"chrX", "chrY", "X", "Y", "chrM", "MT", "chrMT", "*"}
-    if exclude_chroms:
-        skip.update(exclude_chroms)
+    Compute mean depth across autosome background regions.
 
-    total_reads = 0
+    Two modes:
+    1. target_bed provided (panel/capture BAM):
+       Use samtools bedcov on target BED regions (excluding dark gene chroms).
+       This gives per-base mean depth that is directly comparable to dark gene
+       bedcov output.  Required for capture-based panel BAMs where the read
+       distribution is non-uniform genome-wide.
+
+    2. target_bed not provided (WGS or low-pass cfDNA):
+       Use samtools idxstats (reads/chrom_length × read_length).
+       Only valid when reads are approximately uniformly distributed.
+    """
+    skip_chroms = {"chrX", "chrY", "X", "Y", "chrM", "MT", "chrMT", "*"}
+    if exclude_chroms:
+        skip_chroms.update(exclude_chroms)
+
+    # ── Panel mode: bedcov on target BED, skip dark gene chromosomes ──────────
+    if target_bed:
+        total_sum  = 0
+        total_bp   = 0
+        with open(target_bed) as fh:
+            for raw in fh:
+                raw = raw.strip()
+                if not raw or raw.startswith("#"):
+                    continue
+                parts = raw.split("\t")
+                if len(parts) < 3:
+                    continue
+                chrom, start, end = parts[0], int(parts[1]), int(parts[2])
+                if chrom in skip_chroms:
+                    continue
+                if "_" in chrom or chrom.startswith("chrUn") or chrom.startswith("HLA"):
+                    continue
+                total_bp += end - start
+
+        if total_bp == 0:
+            logger.warning("target_bed has no usable autosome regions after filtering; "
+                           "falling back to idxstats background.")
+        else:
+            # Write a temporary filtered BED and run bedcov once
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".bed", delete=False) as tmp:
+                tmp_path = tmp.name
+                with open(target_bed) as fh:
+                    for raw in fh:
+                        raw = raw.strip()
+                        if not raw or raw.startswith("#"):
+                            continue
+                        parts = raw.split("\t")
+                        if len(parts) < 3:
+                            continue
+                        chrom, start, end = parts[0], int(parts[1]), int(parts[2])
+                        if chrom in skip_chroms:
+                            continue
+                        if "_" in chrom or chrom.startswith("chrUn") or chrom.startswith("HLA"):
+                            continue
+                        tmp.write(f"{chrom}\t{start}\t{end}\n")
+
+            result = run_cmd(["samtools", "bedcov", tmp_path, bam_path], check=False)
+            os.unlink(tmp_path)
+
+            if result.returncode == 0:
+                total_cov = 0
+                total_len = 0
+                for line in result.stdout.splitlines():
+                    cols = line.strip().split("\t")
+                    if len(cols) < 4:
+                        continue
+                    length = int(cols[2]) - int(cols[1])
+                    cov_sum = int(cols[-1])
+                    total_cov += cov_sum
+                    total_len += length
+                if total_len > 0:
+                    bg = total_cov / total_len
+                    logger.info("Background depth from target BED bedcov: %.2f×", bg)
+                    return bg
+
+            logger.warning("bedcov on target BED failed; falling back to idxstats.")
+
+    # ── WGS / fallback mode: idxstats ─────────────────────────────────────────
+    # Returns reads/bp which is then multiplied by an assumed read length (~150)
+    # during output formatting.  The ratio region_depth/bg_depth is only valid
+    # here when both are in the same depth units — so we multiply bg by the
+    # effective read length derived from the first chromosome with meaningful coverage.
+    stats = samtools_idxstats(bam_path)
+
+    total_reads  = 0
     total_length = 0
+    total_cov    = 0   # sum of (mapped * read_len) as proxy for total base coverage
+    READ_LEN_PROXY = 150
+
     for chrom, (length, mapped) in stats.items():
-        if chrom in skip:
+        if chrom in skip_chroms:
             continue
-        # Skip unplaced contigs / alt contigs
         if "_" in chrom or chrom.startswith("chrUn") or chrom.startswith("HLA"):
             continue
-        total_reads += mapped
+        total_reads  += mapped
         total_length += length
+        total_cov    += mapped * READ_LEN_PROXY
 
     if total_length == 0:
         return 0.0
 
-    # approximate: total_reads * read_length / chrom_length
-    # But we don't know read_length here; use reads/bp as relative measure.
-    # For normalization purposes (ratio), the absolute value cancels.
-    # Return reads per base (x read_length for actual depth).
-    return total_reads / total_length
+    bg = total_cov / total_length   # approximate mean depth (×) across genome
+    logger.info("Background depth from idxstats (WGS proxy): %.4f×", bg)
+    return bg
 
 
 def mpileup_at_position(
@@ -479,6 +558,7 @@ def analyse_dark_genes(
     sample_id: str,
     ref_fasta: Optional[str] = None,
     min_background_depth: float = 5.0,
+    target_bed: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Main entry point.
@@ -501,10 +581,13 @@ def analyse_dark_genes(
 
     # ── Compute background depth ─────────────────────────────────────────────
     logger.info("Computing autosome background depth...")
-    # Exclude dark gene chromosomes from background to avoid circular bias
+    # Exclude dark gene chromosomes (chr1/chr5/chr16) to avoid circular bias.
+    # target_bed (panel BED) is strongly preferred for capture-based panels —
+    # bedcov on target regions gives depth in the same units as dark gene bedcov.
     bg_depth = compute_autosome_background_depth(
         bam_path,
         exclude_chroms=["chr5", "chr1", "chr16"],
+        target_bed=target_bed,
     )
     if bg_depth < 1e-9:
         logger.error("Background depth is zero. BAM may be empty or wrong chromosome names.")
@@ -603,8 +686,8 @@ def analyse_dark_genes(
             gene=region_meta["gene"],
             disease=region_meta["disease"],
             observed_ratio=round(observed_ratio, 4),
-            background_depth=round(bg_depth * 150, 2),  # × read_length approx
-            region_depth=round(region_depth * 150, 2),
+            background_depth=round(bg_depth, 2),
+            region_depth=round(region_depth, 2),
             fetal_fraction=round(fetal_fraction, 4),
             ff_confidence=ff_confidence,
             expected_ratio_normal=round(r_normal, 4),
@@ -697,6 +780,10 @@ def main():
     parser.add_argument("--ff-json",       required=True, help="Fetal fraction JSON from ESTIMATE_FETAL_FRACTION")
     parser.add_argument("--sample-id",     required=True, help="Sample identifier")
     parser.add_argument("--ref-fasta",     default=None,  help="Reference FASTA (optional, improves mpileup quality)")
+    parser.add_argument("--target-bed",    default=None,
+                        help="Panel target BED (recommended for capture panels). "
+                             "Used for background depth via bedcov — more accurate than idxstats "
+                             "when reads are non-uniformly distributed across the genome.")
     parser.add_argument("--output-json",   required=True, help="Output JSON report path")
     parser.add_argument("--output-tsv",    required=True, help="Output depth TSV path")
     parser.add_argument("--min-ff",        type=float, default=0.03,
@@ -712,6 +799,7 @@ def main():
         sample_id=args.sample_id,
         ref_fasta=args.ref_fasta,
         min_background_depth=args.min_ff,
+        target_bed=args.target_bed,
     )
 
     Path(args.output_json).parent.mkdir(parents=True, exist_ok=True)

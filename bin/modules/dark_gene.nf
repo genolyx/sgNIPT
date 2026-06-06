@@ -11,7 +11,7 @@
  *  Approach (cfDNA-adapted from gx-exome dark gene analysis):
  *    1. samtools bedcov — regional read depth per dark gene window
  *    2. samtools mpileup at SMN1 c.840 discriminating position — SMN1 fraction
- *    3. Autosome background normalization (idxstats)
+ *    3. Autosome background normalization (bedcov on panel target BED, or idxstats fallback)
  *    4. FF-aware dosage interpretation (dark_gene_nipt.py)
  *       observed_ratio = maternal_ratio × (1 − FF) + fetal_ratio × FF
  *
@@ -37,6 +37,7 @@ process DARK_GENE_CNV_ANALYSIS {
     tuple val(sample_id), path(bam), path(bai)
     tuple val(sample_id), path(ff_json)
     path(dark_gene_bed)
+    path(target_bed)
     path(reference_fasta)
     path(reference_fai)
 
@@ -45,7 +46,8 @@ process DARK_GENE_CNV_ANALYSIS {
     tuple val(sample_id), path("${sample_id}.dark_gene_depth.tsv"),   emit: dark_gene_tsv
 
     script:
-    def ref_arg = reference_fasta.name != 'NO_REF' ? "--ref-fasta ${reference_fasta}" : ""
+    def ref_arg        = reference_fasta.name != 'NO_REF' ? "--ref-fasta ${reference_fasta}" : ""
+    def target_bed_arg = target_bed.name != 'NO_TARGET_BED' ? "--target-bed ${target_bed}" : ""
     """
     export HOME=\$PWD
 
@@ -55,6 +57,7 @@ process DARK_GENE_CNV_ANALYSIS {
         --ff-json       ${ff_json} \\
         --sample-id     ${sample_id} \\
         ${ref_arg} \\
+        ${target_bed_arg} \\
         --output-json   ${sample_id}.dark_gene_report.json \\
         --output-tsv    ${sample_id}.dark_gene_depth.tsv
     """
