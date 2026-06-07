@@ -108,6 +108,34 @@ def find_sample_outputs(output_dir: Path, sample_id: str) -> Dict[str, Optional[
     return found
 
 
+def _parse_bam_qc_blob(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Map pipeline bam_qc.json (flagstat/stats/target) to portal summary fields."""
+    legacy = data.get("metrics") if isinstance(data.get("metrics"), dict) else {}
+    flagstat = data.get("flagstat_metrics") if isinstance(data.get("flagstat_metrics"), dict) else {}
+    stats = data.get("stats_metrics") if isinstance(data.get("stats_metrics"), dict) else {}
+    target = data.get("target_metrics") if isinstance(data.get("target_metrics"), dict) else {}
+
+    def pick(*keys: str):
+        for key in keys:
+            for src in (legacy, flagstat, stats, target):
+                if key in src and src[key] is not None:
+                    return src[key]
+        return None
+
+    dup = pick("duplicate_rate", "dup_rate")
+    return {
+        "total_reads": pick("total_reads", "raw_total_sequences"),
+        "mapped_reads": pick("mapped_reads", "reads_mapped"),
+        "mapping_rate": pick("mapping_rate"),
+        "mean_coverage": pick("mean_coverage", "mean_target_coverage", "mean_genome_coverage"),
+        "target_coverage": pick("target_mean_coverage", "mean_target_coverage"),
+        "on_target_rate": pick("on_target_rate"),
+        "dup_rate": dup,
+        "mean_mapping_quality": pick("mean_mapping_quality", "average_quality"),
+        "overall_pass": (data.get("qc_evaluation") or {}).get("overall_qc_pass", True),
+    }
+
+
 def build_sample_result(sample_id: str, output_dir: Path) -> Dict[str, Any]:
     """Build a result dictionary for a single sample."""
     logger.info("Processing sample: %s", sample_id)
@@ -140,15 +168,7 @@ def build_sample_result(sample_id: str, output_dir: Path) -> Dict[str, Any]:
     if files["bam_qc"]:
         data = load_json_safe(files["bam_qc"])
         if data:
-            result["bam_qc"] = {
-                "mapped_reads": data.get("metrics", {}).get("mapped_reads"),
-                "mapping_rate": data.get("metrics", {}).get("mapping_rate"),
-                "mean_coverage": data.get("metrics", {}).get("mean_coverage"),
-                "target_coverage": data.get("metrics", {}).get("target_mean_coverage"),
-                "on_target_rate": data.get("metrics", {}).get("on_target_rate"),
-                "dup_rate": data.get("metrics", {}).get("duplicate_rate"),
-                "overall_pass": data.get("qc_evaluation", {}).get("overall_qc_pass", True),
-            }
+            result["bam_qc"] = _parse_bam_qc_blob(data)
             if not result["bam_qc"]["overall_pass"]:
                 result["status_flags"].append("BAM_QC_FAIL")
     else:
