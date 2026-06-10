@@ -108,14 +108,15 @@ process VARIANT_ANALYSIS {
 
     """
     export HOME=\$PWD
-    # Extract fetal fraction value from JSON (handle None when FF estimation failed)
-    FF=\$(python3 -c "import json; d=json.load(open('${ff_json}')); v=d.get('primary_fetal_fraction'); print(v if v is not None else 0.05)")
+    # Extract fetal fraction value from JSON; leave empty if estimation failed
+    FF_RAW=\$(python3 -c "import json; d=json.load(open('${ff_json}')); v=d.get('primary_fetal_fraction'); print(v if v is not None else '')")
+    FF_ARG=\$([ -n "\${FF_RAW}" ] && echo "--fetal-fraction \${FF_RAW}" || echo "")
 
     python3 ${projectDir}/scripts/variant_analysis.py \\
         --sample-id ${sample_id} \\
         --vcf ${vcf} \\
         --target-bed ${target_bed} \\
-        --fetal-fraction \${FF} \\
+        \${FF_ARG} \\
         ${zero_arg} \\
         ${gene_list_arg} \\
         ${config_arg} \\

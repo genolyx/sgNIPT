@@ -409,11 +409,14 @@ def parse_vcf_variants(vcf_path: str, config: Dict[str, Any]) -> List[Dict[str, 
 # ---------------------------------------------------------------------------
 def classify_variant_origin(
     variant: Dict[str, Any],
-    fetal_fraction: float,
+    fetal_fraction: Optional[float],
     config: Dict[str, Any],
 ) -> Dict[str, Any]:
     """
     Classify a variant's origin based on allele frequency and fetal fraction.
+
+    If fetal_fraction is None (FF estimation failed), all variants are marked
+    as 'unknown' — origin classification requires a valid FF estimate.
 
     Classification logic:
     1. VAF ~ 50%: Maternal heterozygous (could also be shared with fetus)
@@ -422,6 +425,16 @@ def classify_variant_origin(
     4. VAF ~ 50% + FF/2: Maternal carrier + fetal inherited
     5. VAF ~ 50% - FF/2: Maternal carrier, fetus did NOT inherit
     """
+    if fetal_fraction is None:
+        return {
+            "origin": "unknown",
+            "confidence": "na",
+            "fetal_genotype_prediction": "unknown",
+            "maternal_genotype_prediction": "unknown",
+            "details": "FF estimation failed — origin classification not possible.",
+            "binomial_pvalue": None,
+        }
+
     vaf = variant["vaf"]
     depth = variant["depth"]
     alt_count = variant["alt_count"]
@@ -689,7 +702,7 @@ def write_fetal_vcf(
 
 def generate_variant_report(
     variants: List[Dict[str, Any]],
-    fetal_fraction: float,
+    fetal_fraction: Optional[float],
     sample_id: str,
     gene_coverage: Optional[Dict[str, Any]] = None,
     zero_probe_stats: Optional[Dict[str, Any]] = None,
@@ -831,8 +844,9 @@ def main():
     parser.add_argument(
         "--fetal-fraction",
         type=float,
-        required=True,
-        help="Estimated fetal fraction (0-1).",
+        required=False,
+        default=None,
+        help="Estimated fetal fraction (0-1). Omit when FF estimation failed.",
     )
     parser.add_argument(
         "--gene-list",
@@ -910,7 +924,10 @@ def main():
         gene_coverage = validate_gene_coverage(targets, gene_list)
 
     # Classify each variant
-    logger.info("Classifying variant origins (FF=%.4f)...", args.fetal_fraction)
+    if args.fetal_fraction is not None:
+        logger.info("Classifying variant origins (FF=%.4f)...", args.fetal_fraction)
+    else:
+        logger.warning("Fetal fraction not available — all variants will be classified as 'unknown'.")
     for var in variants:
         var["classification"] = classify_variant_origin(var, args.fetal_fraction, config)
 
@@ -941,7 +958,7 @@ def main():
     print(f"VARIANT ANALYSIS SUMMARY - {args.sample_id}")
     print(f"{'='*60}")
     print(f"Panel: Twist UCL_SingleGeneNIPT TE-96276661 (hg38)")
-    print(f"Fetal Fraction: {args.fetal_fraction:.4f}")
+    print(f"Fetal Fraction: {f'{args.fetal_fraction:.4f}' if args.fetal_fraction is not None else 'N/A (estimation failed)'}")
     print(f"Total variants analyzed: {summary['total_variants_analyzed']}")
     print(f"Variants in target regions: {summary['variants_in_target']}")
     print(f"Fetal-specific variants: {summary['fetal_specific_variants']}")
