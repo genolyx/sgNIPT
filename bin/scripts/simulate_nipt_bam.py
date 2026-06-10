@@ -73,6 +73,8 @@ def parse_variants_tsv(path: str) -> list:
             if len(parts) < 4:
                 continue
             chrom = parts[0]
+            if chrom == "chrom":  # skip header row
+                continue
             pos1  = int(parts[1])          # 1-based VCF/human convention
             ref   = parts[2].upper()
             alt   = parts[3].upper()

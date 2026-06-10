@@ -51,8 +51,17 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "maternal_het_lower": 0.35,
     "maternal_het_upper": 0.65,
     # Fetal-specific allele detection: AF should be around FF/2
-    # We use a window of FF/2 +/- tolerance
-    "fetal_af_tolerance_factor": 2.0,  # multiplier for expected FF/2
+    # Tolerance = FF/2 * factor  →  fetal window = FF/2 ± (FF/2 * factor)
+    # 0.5 means ±50% of expected fetal AF (e.g. FF10 → 2.5%–7.5%)
+    "fetal_af_tolerance_factor": 0.5,
+    # When FF is below this threshold the pipeline cannot reliably define the
+    # fetal allele window.  Variants whose VAF is also below this threshold are
+    # classified as noise; variants above it are kept as ambiguous.
+    "min_ff_for_fetal_classification": 0.03,
+    # Noise floor expressed as a fraction of FF/2.
+    # Variants with VAF < (FF/2 * noise_floor_fraction) are noise.
+    # 0.5 means anything below half the expected fetal VAF is noise.
+    "noise_floor_fraction": 0.5,
     # Minimum base quality
     "min_base_quality": 20,
     # Minimum mapping quality
@@ -420,6 +429,17 @@ def classify_variant_origin(
     expected_fetal_af = fetal_fraction / 2.0
     tolerance = expected_fetal_af * config["fetal_af_tolerance_factor"]
 
+    # FF-based noise floor: variants below this VAF are sequencing noise
+    # When FF is reliably estimated, noise_floor = FF/2 * noise_floor_fraction
+    # When FF is too low to be reliable, use min_ff_for_fetal_classification as floor
+    min_ff = config["min_ff_for_fetal_classification"]
+    if fetal_fraction >= min_ff:
+        noise_floor = expected_fetal_af * config["noise_floor_fraction"]
+    else:
+        # FF is too low to be reliable.  Use min_ff itself as the noise floor
+        # so that all low-VAF artefacts are suppressed when FF is unknown.
+        noise_floor = min_ff
+
     classification = {
         "origin": "unknown",
         "confidence": "low",
@@ -427,6 +447,17 @@ def classify_variant_origin(
         "maternal_genotype_prediction": "unknown",
         "details": "",
     }
+
+    # Noise floor check: VAF too low to be meaningful given the fetal fraction
+    if vaf < noise_floor:
+        classification["origin"] = "noise"
+        classification["confidence"] = "low"
+        classification["details"] = (
+            f"VAF={vaf:.4f} below noise floor ({noise_floor:.4f} = "
+            f"FF/2×{config['noise_floor_fraction']} at FF={fetal_fraction:.4f})."
+        )
+        classification["binomial_pvalue"] = binomial_test(alt_count, depth, expected_fetal_af)
+        return classification
 
     # Case 1: Very high VAF -> maternal homozygous alt
     if vaf >= config["maternal_hom_alt_threshold"]:
@@ -493,19 +524,29 @@ def classify_variant_origin(
                 f"not significant (p={p_value:.2e})."
             )
 
-    # Case 4: Very low VAF -> possible noise or very low fetal signal
+    # Case 4: Very low VAF (after noise_floor, still below 2×min_vaf)
     elif vaf < config["min_vaf"] * 2:
         classification["origin"] = "noise"
         classification["confidence"] = "low"
         classification["details"] = f"VAF={vaf:.4f} too low, likely sequencing noise."
 
-    # Case 5: Intermediate VAF
+    # Case 5: Intermediate VAF — does not fit any clear category
     else:
         classification["origin"] = "ambiguous"
         classification["confidence"] = "low"
-        classification["details"] = (
-            f"VAF={vaf:.4f} does not clearly fit maternal or fetal-specific patterns."
-        )
+        if fetal_fraction < min_ff:
+            classification["details"] = (
+                f"VAF={vaf:.4f} is ambiguous. "
+                f"NOTE: calculated FF={fetal_fraction:.4f} is below the reliable threshold "
+                f"({min_ff:.0%}); fetal variant window cannot be determined. "
+                f"Expected fetal VAF would be ~{expected_fetal_af:.4f} if FF were accurate."
+            )
+        else:
+            classification["details"] = (
+                f"VAF={vaf:.4f} does not clearly fit maternal or "
+                f"fetal-specific patterns (expected fetal AF={expected_fetal_af:.4f} ± "
+                f"{tolerance:.4f})."
+            )
 
     # Add statistical support
     classification["binomial_pvalue"] = binomial_test(alt_count, depth, expected_fetal_af)
@@ -822,6 +863,22 @@ def main():
 
     # Parse variants
     variants = parse_vcf_variants(args.vcf, config)
+
+    # Deduplicate by (chrom, pos, ref, alt) — bcftools mpileup can emit
+    # the same site multiple times when overlapping BED intervals are present.
+    seen_keys: set = set()
+    deduped: List[Dict[str, Any]] = []
+    for v in variants:
+        key = (v["chrom"], v["pos"], v["ref"], v["alt"])
+        if key not in seen_keys:
+            seen_keys.add(key)
+            deduped.append(v)
+    if len(deduped) < len(variants):
+        logger.info(
+            "Deduplication: %d → %d variants (removed %d duplicates)",
+            len(variants), len(deduped), len(variants) - len(deduped),
+        )
+    variants = deduped
 
     # Annotate with target regions
     variants = annotate_with_targets(variants, targets)
