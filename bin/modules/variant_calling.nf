@@ -74,11 +74,20 @@ process FILTER_VARIANTS {
 
     script:
     """
+    # Step 1: depth pre-filter (broad pass)
+    # Step 2: normalize — split multiallelic into one ALT per row
+    #          (ADF/ADR indices become correct per-allele after splitting)
+    # Step 3: strand bias filter — require ≥1 ALT read on each strand
+    #          Single-strand-only ALT reads are a strong indicator of PCR /
+    #          library-prep error; true cfDNA variants appear on both strands.
     bcftools view \\
         -i 'FORMAT/DP >= ${params.vc_min_depth}' \\
         ${vcf} \\
     | bcftools norm \\
         -m -both \\
+        -Ov \\
+    | bcftools view \\
+        -i 'FORMAT/ADF[0:1] >= 1 && FORMAT/ADR[0:1] >= 1' \\
         -Ov \\
         -o ${sample_id}.filtered_variants.vcf
     """
@@ -108,15 +117,37 @@ process VARIANT_ANALYSIS {
 
     """
     export HOME=\$PWD
-    # Extract fetal fraction value from JSON; leave empty if estimation failed
-    FF_RAW=\$(python3 -c "import json; d=json.load(open('${ff_json}')); v=d.get('primary_fetal_fraction'); print(v if v is not None else '')")
+    # Extract fetal fraction and 95% CI bounds from JSON
+    FF_RAW=\$(python3 -c "
+import json, sys
+d = json.load(open('${ff_json}'))
+v = d.get('primary_fetal_fraction')
+print(v if v is not None else '')
+")
     FF_ARG=\$([ -n "\${FF_RAW}" ] && echo "--fetal-fraction \${FF_RAW}" || echo "")
+
+    # Extract CI bounds from the primary method (snp_informative preferred)
+    CI_ARGS=\$(python3 -c "
+import json, sys
+d = json.load(open('${ff_json}'))
+method = d.get('primary_method', 'snp_informative')
+methods = d.get('methods', {})
+m = methods.get(method, {})
+ci = m.get('confidence_interval_95', {})
+lo = ci.get('lower')
+hi = ci.get('upper')
+if lo is not None and hi is not None:
+    print(f'--ff-ci-lower {lo} --ff-ci-upper {hi}')
+else:
+    print('')
+")
 
     python3 ${projectDir}/scripts/variant_analysis.py \\
         --sample-id ${sample_id} \\
         --vcf ${vcf} \\
         --target-bed ${target_bed} \\
         \${FF_ARG} \\
+        \${CI_ARGS} \\
         ${zero_arg} \\
         ${gene_list_arg} \\
         ${config_arg} \\

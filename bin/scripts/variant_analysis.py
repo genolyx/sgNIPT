@@ -53,7 +53,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Fetal-specific allele detection: AF should be around FF/2
     # Tolerance = FF/2 * factor  →  fetal window = FF/2 ± (FF/2 * factor)
     # 0.5 means ±50% of expected fetal AF (e.g. FF10 → 2.5%–7.5%)
-    "fetal_af_tolerance_factor": 0.5,
+    # Fraction of expected_fetal_af (FF/2) used as tolerance for the fetal window.
+    # fetal window = [FF/2 × (1-factor), FF/2 × (1+factor)]
+    # 0.25 → ±25%: at FF=10%, window is 4.11%~6.85%. Balances sensitivity vs FP suppression.
+    # Do NOT raise above 0.5: the lower bound would overlap the noise floor (FF/4) too much.
+    "fetal_af_tolerance_factor": 0.25,
     # When FF is below this threshold the pipeline cannot reliably define the
     # fetal allele window.  Variants whose VAF is also below this threshold are
     # classified as noise; variants above it are kept as ambiguous.
@@ -68,6 +72,34 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "min_mapping_quality": 30,
     # Binomial test p-value threshold for fetal allele detection
     "binomial_pvalue_threshold": 0.01,
+    # ── Fetal Fraction Confidence Interval (CI) correction ────────────────
+    # When FF is estimated with uncertainty, noise thresholds are raised using
+    # the upper CI direction so that more low-VAF background noise is filtered.
+    #
+    # effective_ff_noise = min(ff + z * se, ci_upper)   ← used for noise_floor
+    #                                                       and sub-fetal bound
+    # effective_ff_fetal = ff                           ← always use point
+    #                                                       estimate for fetal
+    #                                                       window centre
+    #
+    # z = ff_ci_z_score standard errors above the point estimate.
+    # When no CI is supplied, effective_ff_noise = ff (no correction applied).
+    "ff_ci_z_score": 1.0,
+    # Relative CI width (= (ci_upper-ci_lower)/ff) above which the FF estimate
+    # is flagged as "wide CI" and confidence is downgraded to 'medium'.
+    "ff_ci_wide_threshold": 0.15,
+    # ── Strand-bias error filter ──────────────────────────────────────────
+    # True variants (including low-VAF fetal alleles) appear on both DNA
+    # strands.  PCR and library-prep errors are typically strand-specific.
+    # Set to False to disable the strand-bias filter (e.g. for troubleshooting).
+    "strand_bias_filter_enabled": True,
+    # Each strand must carry at least this many ALT reads.
+    # 1 is the minimum meaningful threshold at very high depth (≥300×);
+    # raise to 2 for more aggressive filtering at lower depths.
+    "strand_bias_min_per_strand": 1,
+    # Maximum allowed forward/reverse ALT-read ratio.
+    # A ratio > 20 means one strand has ≥20× more ALT reads than the other.
+    "strand_bias_max_ratio": 20.0,
 }
 
 
@@ -361,6 +393,30 @@ def parse_vcf_variants(vcf_path: str, config: Dict[str, Any]) -> List[Dict[str, 
             if dp is None or dp < config["min_depth"]:
                 continue
 
+            # Parse per-allele strand depths (ADF = forward, ADR = reverse)
+            # Produced by bcftools mpileup -a FORMAT/ADF,FORMAT/ADR
+            adf = None
+            if "ADF" in fmt_dict:
+                try:
+                    adf = [int(x) for x in fmt_dict["ADF"].split(",")]
+                except ValueError:
+                    adf = None
+
+            adr = None
+            if "ADR" in fmt_dict:
+                try:
+                    adr = [int(x) for x in fmt_dict["ADR"].split(",")]
+                except ValueError:
+                    adr = None
+
+            # SP: Phred-scaled strand-bias p-value (bcftools per-sample field)
+            sp = None
+            if "SP" in fmt_dict:
+                try:
+                    sp = int(fmt_dict["SP"])
+                except ValueError:
+                    sp = None
+
             # Parse INFO field
             info_dict = {}
             for item in info.split(";"):
@@ -381,6 +437,10 @@ def parse_vcf_variants(vcf_path: str, config: Dict[str, Any]) -> List[Dict[str, 
                 if vaf < config["min_vaf"]:
                     continue
 
+                # Per-allele strand counts for this ALT (index i+1)
+                adf_alt = adf[i + 1] if adf and len(adf) > i + 1 else None
+                adr_alt = adr[i + 1] if adr and len(adr) > i + 1 else None
+
                 variant = {
                     "chrom": chrom,
                     "pos": pos,
@@ -393,6 +453,9 @@ def parse_vcf_variants(vcf_path: str, config: Dict[str, Any]) -> List[Dict[str, 
                     "depth": dp,
                     "ref_count": ref_count,
                     "alt_count": alt_count,
+                    "adf_alt": adf_alt,   # ALT reads on forward strand
+                    "adr_alt": adr_alt,   # ALT reads on reverse strand
+                    "sp": sp,             # Phred-scaled strand-bias p-value
                     "_raw_vcf_line": raw_line,
                     "_raw_info": info,
                     "vaf": round(vaf, 6),
@@ -411,12 +474,18 @@ def classify_variant_origin(
     variant: Dict[str, Any],
     fetal_fraction: Optional[float],
     config: Dict[str, Any],
+    ff_ci_lower: Optional[float] = None,
+    ff_ci_upper: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Classify a variant's origin based on allele frequency and fetal fraction.
 
     If fetal_fraction is None (FF estimation failed), all variants are marked
     as 'unknown' — origin classification requires a valid FF estimate.
+
+    When ff_ci_lower / ff_ci_upper are provided the noise floor and sub-fetal
+    noise bound use a CI-adjusted effective FF (upper-side correction) so that
+    uncertain FF estimates result in more conservative (higher) noise thresholds.
 
     Classification logic:
     1. VAF ~ 50%: Maternal heterozygous (could also be shared with fetus)
@@ -433,21 +502,79 @@ def classify_variant_origin(
             "maternal_genotype_prediction": "unknown",
             "details": "FF estimation failed — origin classification not possible.",
             "binomial_pvalue": None,
+            "strand_bias": False,
+            "strand_bias_reason": "",
+            "ff_ci_adjusted": False,
+            "ff_ci_wide": False,
         }
+
+    # ── CI-based effective FF for noise thresholds ─────────────────────────
+    # Use the upper CI direction for noise_floor and sub-fetal bound so that
+    # an over-estimated FF (wide CI) leads to stricter noise filtering.
+    ff_ci_adjusted = False
+    ff_ci_wide = False
+    effective_ff_noise = fetal_fraction  # default: no CI correction
+
+    if ff_ci_lower is not None and ff_ci_upper is not None:
+        ci_width = ff_ci_upper - ff_ci_lower
+        ci_relative_width = ci_width / fetal_fraction if fetal_fraction > 0 else 0.0
+        # SE from 95% CI assuming normal approximation
+        se = ci_width / (2 * 1.96)
+        # Raise effective noise FF by z*SE (capped at CI upper bound)
+        z = config.get("ff_ci_z_score", 1.0)
+        effective_ff_noise = min(fetal_fraction + z * se, ff_ci_upper)
+        ff_ci_adjusted = (effective_ff_noise != fetal_fraction)
+        ff_ci_wide = ci_relative_width > config.get("ff_ci_wide_threshold", 0.15)
+        logger.debug(
+            "CI correction: FF=%.4f SE=%.4f effective_ff_noise=%.4f wide=%s",
+            fetal_fraction, se, effective_ff_noise, ff_ci_wide,
+        )
 
     vaf = variant["vaf"]
     depth = variant["depth"]
     alt_count = variant["alt_count"]
 
+    # ── Strand-bias pre-filter ──────────────────────────────────────────────
+    # Check this before all other classification: a strand-biased ALT allele
+    # is almost certainly a sequencing / library-prep artefact regardless of
+    # its VAF.  True low-VAF fetal alleles arise from genuine double-stranded
+    # cfDNA fragments and must be observable on both strands.
+    if config.get("strand_bias_filter_enabled", True):
+        is_biased, bias_reason = check_strand_bias(
+            variant.get("adf_alt"),
+            variant.get("adr_alt"),
+            min_per_strand=config.get("strand_bias_min_per_strand", 1),
+            max_ratio=config.get("strand_bias_max_ratio", 20.0),
+        )
+        if is_biased:
+            return {
+                "origin": "noise",
+                "confidence": "high",
+                "fetal_genotype_prediction": "unknown",
+                "maternal_genotype_prediction": "unknown",
+                "details": f"Strand-bias filter: {bias_reason}. "
+                           f"VAF={vaf:.4f} fwd={variant.get('adf_alt')} "
+                           f"rev={variant.get('adr_alt')}.",
+                "binomial_pvalue": None,
+                "strand_bias": True,
+                "strand_bias_reason": bias_reason,
+            }
+
+    # expected_fetal_af uses the POINT ESTIMATE for the fetal window centre
+    # so that true fetal variants are not shifted out of the window.
     expected_fetal_af = fetal_fraction / 2.0
     tolerance = expected_fetal_af * config["fetal_af_tolerance_factor"]
+
+    # effective_fetal_af_noise uses the CI-adjusted (upper-side) FF so that
+    # noise floor and sub-fetal bound are raised when FF is uncertain.
+    effective_expected_fetal_af_noise = effective_ff_noise / 2.0
 
     # FF-based noise floor: variants below this VAF are sequencing noise
     # When FF is reliably estimated, noise_floor = FF/2 * noise_floor_fraction
     # When FF is too low to be reliable, use min_ff_for_fetal_classification as floor
     min_ff = config["min_ff_for_fetal_classification"]
     if fetal_fraction >= min_ff:
-        noise_floor = expected_fetal_af * config["noise_floor_fraction"]
+        noise_floor = effective_expected_fetal_af_noise * config["noise_floor_fraction"]
     else:
         # FF is too low to be reliable.  Use min_ff itself as the noise floor
         # so that all low-VAF artefacts are suppressed when FF is unknown.
@@ -459,6 +586,11 @@ def classify_variant_origin(
         "fetal_genotype_prediction": "unknown",
         "maternal_genotype_prediction": "unknown",
         "details": "",
+        "strand_bias": False,
+        "strand_bias_reason": "",
+        "ff_ci_adjusted": ff_ci_adjusted,
+        "ff_ci_wide": ff_ci_wide,
+        "effective_ff_noise": round(effective_ff_noise, 6),
     }
 
     # Noise floor check: VAF too low to be meaningful given the fetal fraction
@@ -471,6 +603,26 @@ def classify_variant_origin(
         )
         classification["binomial_pvalue"] = binomial_test(alt_count, depth, expected_fetal_af)
         return classification
+
+    # Sub-fetal noise check: VAF is above the noise floor but below the fetal window
+    # lower bound.  These variants cannot be fetal-specific (too low) and cannot be
+    # maternal (far from 50%), so they are sequencing background noise.
+    # Uses effective_ff_noise (CI-adjusted upper-side) so that a wider CI raises
+    # this boundary and catches more sub-fetal noise.
+    # fetal_lower = effective_FF_noise/2 × (1 - tolerance_factor)
+    if fetal_fraction >= min_ff:
+        fetal_lower = effective_expected_fetal_af_noise * (1.0 - config["fetal_af_tolerance_factor"])
+        if vaf < fetal_lower:
+            classification["origin"] = "noise"
+            classification["confidence"] = "medium"
+            classification["details"] = (
+                f"VAF={vaf:.4f} is above the noise floor ({noise_floor:.4f}) but below "
+                f"the fetal window lower bound ({fetal_lower:.4f} = FF/2×"
+                f"{1.0 - config['fetal_af_tolerance_factor']:.2f} at FF={fetal_fraction:.4f}). "
+                "Cannot be fetal-specific or maternal — classified as background noise."
+            )
+            classification["binomial_pvalue"] = binomial_test(alt_count, depth, expected_fetal_af)
+            return classification
 
     # Case 1: Very high VAF -> maternal homozygous alt
     if vaf >= config["maternal_hom_alt_threshold"]:
@@ -522,11 +674,17 @@ def classify_variant_origin(
             classification["origin"] = "fetal_specific"
             classification["maternal_genotype_prediction"] = "hom_ref"
             classification["fetal_genotype_prediction"] = "het"
-            classification["confidence"] = "high"
+            # Downgrade confidence when FF CI is wide — the fetal window centre
+            # is less certain, so even a well-placed VAF is less reliable.
+            classification["confidence"] = "medium" if ff_ci_wide else "high"
+            ci_note = (
+                " NOTE: FF confidence interval is wide — classification confidence downgraded."
+                if ff_ci_wide else ""
+            )
             classification["details"] = (
                 f"VAF={vaf:.4f} ~ FF/2={expected_fetal_af:.4f}. "
                 f"Binomial p-value={p_value:.2e}. "
-                "Likely fetal-specific variant (paternal origin)."
+                f"Likely fetal-specific variant (paternal origin).{ci_note}"
             )
         else:
             classification["origin"] = "possible_fetal"
@@ -565,6 +723,52 @@ def classify_variant_origin(
     classification["binomial_pvalue"] = binomial_test(alt_count, depth, expected_fetal_af)
 
     return classification
+
+
+def check_strand_bias(
+    adf_alt: Optional[int],
+    adr_alt: Optional[int],
+    min_per_strand: int = 1,
+    max_ratio: float = 20.0,
+) -> Tuple[bool, str]:
+    """
+    Evaluate strand balance for an ALT allele.
+
+    True cfDNA variants appear on both sequencing strands because the original
+    DNA molecule is double-stranded and library preparation captures both
+    orientations.  Sequencing errors and PCR artefacts are typically confined
+    to one strand (e.g. a misincorporation during a single PCR cycle, or an
+    end-repair artefact on one strand only).
+
+    Returns:
+        (is_biased, reason_string)
+        is_biased = True  →  variant is likely an artefact
+        is_biased = False →  strand distribution looks acceptable
+    """
+    if adf_alt is None or adr_alt is None:
+        # No strand information available (field absent from VCF); skip filter
+        return False, ""
+
+    total = adf_alt + adr_alt
+    if total == 0:
+        return True, "no_alt_reads_on_either_strand"
+
+    # Both strands must carry at least min_per_strand ALT reads
+    if adf_alt < min_per_strand or adr_alt < min_per_strand:
+        return True, (
+            f"single_strand_only: fwd={adf_alt} rev={adr_alt} "
+            f"(min_per_strand={min_per_strand})"
+        )
+
+    # The forward/reverse ratio must not exceed max_ratio
+    ratio = max(adf_alt, adr_alt) / min(adf_alt, adr_alt)
+    if ratio > max_ratio:
+        return True, (
+            f"extreme_strand_ratio={ratio:.1f}x "
+            f"(fwd={adf_alt} rev={adr_alt}, max={max_ratio}x)"
+        )
+
+    return False, ""
 
 
 def binomial_test(successes: int, trials: int, expected_prob: float) -> float:
@@ -706,6 +910,8 @@ def generate_variant_report(
     sample_id: str,
     gene_coverage: Optional[Dict[str, Any]] = None,
     zero_probe_stats: Optional[Dict[str, Any]] = None,
+    ff_ci_lower: Optional[float] = None,
+    ff_ci_upper: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Generate a structured variant analysis report."""
     logger.info("Generating variant analysis report...")
@@ -765,10 +971,27 @@ def generate_variant_report(
         )
     )
 
+    # Build FF CI summary block
+    ff_ci_info: Dict[str, Any] = {"available": False}
+    if ff_ci_lower is not None and ff_ci_upper is not None and fetal_fraction:
+        ci_width = ff_ci_upper - ff_ci_lower
+        se = ci_width / (2 * 1.96)
+        relative_width = ci_width / fetal_fraction
+        ff_ci_info = {
+            "available": True,
+            "ci_lower": round(ff_ci_lower, 6),
+            "ci_upper": round(ff_ci_upper, 6),
+            "ci_width": round(ci_width, 6),
+            "se": round(se, 6),
+            "relative_width": round(relative_width, 4),
+            "wide": relative_width > 0.15,
+        }
+
     report = {
         "sample_id": sample_id,
         "panel": "Twist_UCL_SingleGeneNIPT_TE-96276661_hg38",
         "fetal_fraction_used": fetal_fraction,
+        "fetal_fraction_ci": ff_ci_info,
         "summary": {
             "total_variants_analyzed": total_variants,
             "variants_in_target": len(in_target),
@@ -787,9 +1010,19 @@ def generate_variant_report(
                 "alt": v["alt"],
                 "vaf": v["vaf"],
                 "depth": v["depth"],
+                "alt_count": v.get("alt_count"),
+                "adf_alt": v.get("adf_alt"),
+                "adr_alt": v.get("adr_alt"),
+                "sp": v.get("sp"),
                 "origin": v.get("classification", {}).get("origin", "unknown"),
                 "fetal_genotype": v.get("classification", {}).get("fetal_genotype_prediction", "unknown"),
                 "confidence": v.get("classification", {}).get("confidence", "low"),
+                "details": v.get("classification", {}).get("details", ""),
+                "strand_bias": v.get("classification", {}).get("strand_bias", False),
+                "strand_bias_reason": v.get("classification", {}).get("strand_bias_reason", ""),
+                "ff_ci_adjusted": v.get("classification", {}).get("ff_ci_adjusted", False),
+                "ff_ci_wide": v.get("classification", {}).get("ff_ci_wide", False),
+                "effective_ff_noise": v.get("classification", {}).get("effective_ff_noise"),
                 "target_name": v.get("target_info", {}).get("name", "") if v.get("target_info") else "",
                 "in_zero_probe_region": v.get("in_zero_probe_region", False),
             }
@@ -847,6 +1080,18 @@ def main():
         required=False,
         default=None,
         help="Estimated fetal fraction (0-1). Omit when FF estimation failed.",
+    )
+    parser.add_argument(
+        "--ff-ci-lower",
+        type=float,
+        default=None,
+        help="Lower bound of 95%% confidence interval for FF (0-1). Optional.",
+    )
+    parser.add_argument(
+        "--ff-ci-upper",
+        type=float,
+        default=None,
+        help="Upper bound of 95%% confidence interval for FF (0-1). Optional.",
     )
     parser.add_argument(
         "--gene-list",
@@ -929,7 +1174,13 @@ def main():
     else:
         logger.warning("Fetal fraction not available — all variants will be classified as 'unknown'.")
     for var in variants:
-        var["classification"] = classify_variant_origin(var, args.fetal_fraction, config)
+        var["classification"] = classify_variant_origin(
+            var,
+            args.fetal_fraction,
+            config,
+            ff_ci_lower=args.ff_ci_lower,
+            ff_ci_upper=args.ff_ci_upper,
+        )
 
     # Generate report
     report = generate_variant_report(
@@ -938,6 +1189,8 @@ def main():
         args.sample_id,
         gene_coverage=gene_coverage,
         zero_probe_stats=zero_probe_stats,
+        ff_ci_lower=args.ff_ci_lower,
+        ff_ci_upper=args.ff_ci_upper,
     )
 
     # Write JSON report
