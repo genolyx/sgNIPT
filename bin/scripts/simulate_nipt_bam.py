@@ -59,9 +59,13 @@ def parse_variants_tsv(path: str) -> list:
     Parse a TSV of variants to spike in.
 
     Expected columns (tab-separated, comment lines start with #):
-      chrom  pos(1-based)  ref  alt  gene  label
+      chrom  pos(1-based)  ref  alt  gene  label  [vaf]
 
-    Returns list of dicts with keys: chrom, pos0(0-based), ref, alt, gene, label.
+    Column 7 (vaf) is optional. When provided, it overrides the global --fetal-fraction
+    target VAF for that variant (direct VAF, 0.0–1.0, e.g. 0.5 for heterozygous,
+    1.0 for homozygous).
+
+    Returns list of dicts with keys: chrom, pos0(0-based), ref, alt, gene, label, vaf.
     """
     variants = []
     with open(path) as fh:
@@ -80,11 +84,18 @@ def parse_variants_tsv(path: str) -> list:
             alt   = parts[3].upper()
             gene  = parts[4] if len(parts) > 4 else ""
             label = parts[5] if len(parts) > 5 else f"{chrom}:{pos1}_{ref}>{alt}"
+            per_vaf = None
+            if len(parts) > 6 and parts[6].strip():
+                try:
+                    per_vaf = float(parts[6].strip())
+                except ValueError:
+                    pass
             variants.append({
                 "chrom": chrom, "pos0": pos1 - 1,
                 "ref": ref, "alt": alt,
                 "gene": gene, "label": label,
                 "spike_base": alt,          # what we inject
+                "per_vaf": per_vaf,         # optional per-variant VAF override
             })
     return variants
 
@@ -202,8 +213,13 @@ def spike_reads(bam_in: pysam.AlignmentFile,
     """
     Clone reads overlapping pos0 and change the target base to spike_base.
 
-    Number of reads to add = round(existing_depth * vaf / (1 - vaf)).
-    Returns list of new AlignedSegment objects.
+    For target_vaf < 0.95 (additive mode):
+        Number of reads to add = round(existing_depth * vaf / (1 - vaf)).
+    For target_vaf >= 0.95 (replace mode):
+        Replace all REF-carrying reads with ALT reads in-place (no new reads added).
+        Returns an empty list; the BAM is modified via the returned modified_reads dict.
+
+    Returns list of new AlignedSegment objects (additive mode only).
     """
     try:
         existing = [
@@ -221,40 +237,54 @@ def spike_reads(bam_in: pysam.AlignmentFile,
         return []
 
     n_existing = len(existing)
-    n_to_add   = max(1, round(n_existing * target_vaf / max(1 - target_vaf, 1e-6)))
 
-    new_reads = []
-    for i in range(n_to_add):
-        tmpl = rng.choice(existing)
-
-        # Find which query position corresponds to this reference position
+    def _make_alt_read(tmpl, i):
         ref_to_query = {rp: qp for qp, rp in tmpl.get_aligned_pairs(matches_only=True)}
         qpos = ref_to_query.get(pos0)
         if qpos is None:
-            continue                        # read doesn't cover exact pos (soft-clip etc.)
-
+            return None
         new_r = pysam.AlignedSegment(bam_in.header)
-        new_r.query_name          = f"{tmpl.query_name}_sim_{i}"
-        new_r.flag                = tmpl.flag & ~0x400  # clear duplicate flag
-        new_r.reference_id        = tmpl.reference_id
-        new_r.reference_start     = tmpl.reference_start
-        new_r.mapping_quality     = tmpl.mapping_quality
-        new_r.cigar               = tmpl.cigar
-        new_r.next_reference_id   = tmpl.next_reference_id
+        new_r.query_name           = f"{tmpl.query_name}_sim_{i}"
+        new_r.flag                 = tmpl.flag & ~0x400
+        new_r.reference_id         = tmpl.reference_id
+        new_r.reference_start      = tmpl.reference_start
+        new_r.mapping_quality      = tmpl.mapping_quality
+        new_r.cigar                = tmpl.cigar
+        new_r.next_reference_id    = tmpl.next_reference_id
         new_r.next_reference_start = tmpl.next_reference_start
-        new_r.template_length     = tmpl.template_length
-
-        # Modify the base
+        new_r.template_length      = tmpl.template_length
         seq       = list(tmpl.query_sequence)
         seq[qpos] = spike_base
         new_r.query_sequence = "".join(seq)
-
         if tmpl.query_qualities is not None:
             new_r.query_qualities = tmpl.query_qualities
-
         new_r.set_tags(tmpl.get_tags())
-        new_reads.append(new_r)
+        return new_r
 
+    if target_vaf >= 0.95:
+        # Replace mode: add enough ALT copies so REF is overwhelmed (homozygous simulation)
+        # Strategy: for each non-ALT read, add one ALT clone; keep everything
+        new_reads = []
+        for i, tmpl in enumerate(existing):
+            ref_to_query = {rp: qp for qp, rp in tmpl.get_aligned_pairs(matches_only=True)}
+            qpos = ref_to_query.get(pos0)
+            if qpos is None:
+                continue
+            base = tmpl.query_sequence[qpos].upper()
+            if base != spike_base:
+                r = _make_alt_read(tmpl, i)
+                if r:
+                    new_reads.append(r)
+        return new_reads
+
+    # Additive mode
+    n_to_add = max(1, round(n_existing * target_vaf / max(1 - target_vaf, 1e-6)))
+    new_reads = []
+    for i in range(n_to_add):
+        tmpl = rng.choice(existing)
+        r = _make_alt_read(tmpl, i)
+        if r:
+            new_reads.append(r)
     return new_reads
 
 
@@ -270,8 +300,9 @@ def main():
     )
     ap.add_argument("--bam",            required=True, help="Input BAM (sorted + indexed)")
     ap.add_argument("--output",         required=True, help="Output BAM path")
-    ap.add_argument("--fetal-fraction", required=True, type=float,
-                    help="Fetal fraction to simulate (0.0–0.5), e.g. 0.10 for 10%%")
+    ap.add_argument("--fetal-fraction", required=False, type=float, default=0.0,
+                    help="Fetal fraction to simulate (0.0–0.5). Use 0 (default) for "
+                         "direct-VAF mode where each variant's VAF is read from TSV column 7.")
     ap.add_argument("--variants",       default=None,
                     help="TSV of disease variants to spike (chrom,pos,ref,alt,gene,label)")
     ap.add_argument("--ff-vcf",         default=None,
@@ -284,14 +315,20 @@ def main():
     args = ap.parse_args()
 
     ff  = args.fetal_fraction
-    if not (0 < ff < 0.5):
-        sys.exit(f"[ERROR] --fetal-fraction must be between 0 and 0.5 (got {ff})")
+    # Allow ff=0 as a sentinel meaning "use per-variant VAF from TSV column 7"
+    direct_vaf_mode = (ff == 0.0)
+    if not direct_vaf_mode and not (0 < ff < 0.5):
+        sys.exit(f"[ERROR] --fetal-fraction must be between 0 and 0.5, or 0 for direct-VAF mode (got {ff})")
 
-    target_vaf = ff / 2.0           # fetal het variant → appears at FF/2 in cfDNA
+    target_vaf = ff / 2.0 if not direct_vaf_mode else None
     rng        = random.Random(args.seed)
 
-    print(f"[simulate_nipt_bam] Fetal fraction: {ff:.1%}  →  spike VAF: {target_vaf:.1%}",
-          file=sys.stderr)
+    if direct_vaf_mode:
+        print("[simulate_nipt_bam] Direct-VAF mode: per-variant VAF from TSV column 7",
+              file=sys.stderr)
+    else:
+        print(f"[simulate_nipt_bam] Fetal fraction: {ff:.1%}  →  spike VAF: {target_vaf:.1%}",
+              file=sys.stderr)
 
     # ---- load variant lists ----
     disease_variants = []
@@ -319,25 +356,45 @@ def main():
     bam_in    = pysam.AlignmentFile(args.bam, "rb")
     tmp_path  = args.output + ".tmp_unsorted.bam"
 
-    # Pre-flight: verify maternal genotype at disease variant positions
+    # Pre-flight: verify genotype at disease variant positions
     if disease_variants:
-        print("[simulate_nipt_bam] Verifying maternal genotype at disease positions …",
+        print("[simulate_nipt_bam] Verifying genotype at disease positions …",
               file=sys.stderr)
         skipped = []
         for v in disease_variants:
             gt = check_maternal_genotype(bam_in, v["chrom"], v["pos0"], v["ref"], v["alt"])
-            status = "OK" if gt == "hom_ref" else f"WARN ({gt})"
-            print(f"  [check] {v['label']}  {v['chrom']}:{v['pos0']+1}  "
-                  f"ref={v['ref']} alt={v['alt']}  maternal={gt}  {status}",
-                  file=sys.stderr)
-            if gt != "hom_ref":
-                skipped.append(v)
-                print(f"  [SKIP]  {v['label']} — maternal is NOT hom-ref, spike would be meaningless",
+            per_vaf = v.get("per_vaf")
+            if direct_vaf_mode and per_vaf is not None:
+                # In direct-VAF mode, skip if no data or already at/above target
+                if gt == "no_data":
+                    skipped.append(v)
+                    print(f"  [SKIP]  {v['label']} — no reads at position", file=sys.stderr)
+                elif (per_vaf >= 0.95 and gt == "hom_alt") or \
+                     (per_vaf < 0.95 and gt == "het"):
+                    # Already at target — no extra spiking needed
+                    v["_skip_spike"] = True
+                    print(f"  [check] {v['label']}  {v['chrom']}:{v['pos0']+1}  "
+                          f"ref={v['ref']} alt={v['alt']}  current_gt={gt}  "
+                          f"target_vaf={per_vaf:.0%}  SKIP (already at target)",
+                          file=sys.stderr)
+                else:
+                    print(f"  [check] {v['label']}  {v['chrom']}:{v['pos0']+1}  "
+                          f"ref={v['ref']} alt={v['alt']}  current_gt={gt}  "
+                          f"target_vaf={per_vaf:.0%}  OK",
+                          file=sys.stderr)
+            else:
+                status = "OK" if gt == "hom_ref" else f"WARN ({gt})"
+                print(f"  [check] {v['label']}  {v['chrom']}:{v['pos0']+1}  "
+                      f"ref={v['ref']} alt={v['alt']}  maternal={gt}  {status}",
                       file=sys.stderr)
+                if gt != "hom_ref":
+                    skipped.append(v)
+                    print(f"  [SKIP]  {v['label']} — maternal is NOT hom-ref, spike would be meaningless",
+                          file=sys.stderr)
         for v in skipped:
             disease_variants.remove(v)
         if skipped:
-            print(f"[simulate_nipt_bam] Skipped {len(skipped)} variants (maternal not hom-ref)",
+            print(f"[simulate_nipt_bam] Skipped {len(skipped)} variants",
                   file=sys.stderr)
 
     total_added = 0
@@ -349,11 +406,28 @@ def main():
         spike_base = item["spike_base"]
         label      = item["label"]
 
-        added = spike_reads(bam_in, chrom, pos0, spike_base, target_vaf, rng)
+        # Skip positions already at their target VAF
+        if item.get("_skip_spike"):
+            print(f"  [skip]  {label}  {chrom}:{pos0+1}  already at target VAF",
+                  file=sys.stderr)
+            continue
+
+        # Resolve effective VAF: per-variant override > global target_vaf
+        per_vaf = item.get("per_vaf")
+        if per_vaf is not None and direct_vaf_mode:
+            effective_vaf = per_vaf
+        elif target_vaf is not None:
+            effective_vaf = target_vaf
+        else:
+            print(f"  [SKIP]  {label} — no VAF defined (set --fetal-fraction or add vaf column)",
+                  file=sys.stderr)
+            continue
+
+        added = spike_reads(bam_in, chrom, pos0, spike_base, effective_vaf, rng)
         extra_reads.extend(added)
         total_added += len(added)
         print(f"  [spike] {label}  {chrom}:{pos0+1}  →{spike_base}  "
-              f"added {len(added)} reads (VAF≈{target_vaf:.1%})", file=sys.stderr)
+              f"added {len(added)} reads (VAF≈{effective_vaf:.1%})", file=sys.stderr)
 
     # ---- write output ----
     print(f"[simulate_nipt_bam] Writing {total_added} synthetic reads + all original reads …",
