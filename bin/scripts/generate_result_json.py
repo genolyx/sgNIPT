@@ -18,7 +18,7 @@ import logging
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logging.basicConfig(
     level=logging.INFO,
@@ -136,6 +136,95 @@ def _parse_bam_qc_blob(data: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+_FETAL_ORIGINS = frozenset({"fetal_specific", "fetal", "FETAL", "FETAL_SPECIFIC"})
+_PATHO_CLNSIGS = frozenset({
+    "Pathogenic", "Likely_pathogenic", "Pathogenic/Likely_pathogenic",
+    "PATHOGENIC", "LIKELY_PATHOGENIC",
+})
+
+
+def _compact_vep(vep: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Return a slim VEP dict with only the fields relevant to the daemon."""
+    if not vep:
+        return None
+    clinvar = vep.get("clinvar") or {}
+    return {
+        "hgvsc":       vep.get("hgvsc", ""),
+        "hgvsp":       vep.get("hgvsp", ""),
+        "consequence": vep.get("consequence", ""),
+        "impact":      vep.get("impact", ""),
+        "symbol":      vep.get("symbol", ""),
+        "mane":        vep.get("mane", ""),
+        "gnomad_af":   vep.get("gnomad_af", ""),
+        "existing":    vep.get("existing", ""),
+        "sift":        vep.get("sift", ""),
+        "polyphen":    vep.get("polyphen", ""),
+        "clinvar": {
+            "clnsig":     clinvar.get("clnsig", ""),
+            "clndn":      clinvar.get("clndn", ""),
+            "clnrevstat": clinvar.get("clnrevstat", ""),
+            "clnhgvs":    clinvar.get("clnhgvs", ""),
+        },
+    }
+
+
+def _is_pathogenic_finding(finding: Dict[str, Any]) -> bool:
+    """Return True when a finding should be treated as pathogenic / likely-pathogenic."""
+    # pathogenic_variant field (from variant_analysis.py)
+    if finding.get("pathogenic_variant"):
+        return True
+    # classification field (legacy)
+    cls = (finding.get("classification") or "").upper()
+    if cls in ("PATHOGENIC", "LIKELY_PATHOGENIC"):
+        return True
+    # VEP ClinVar signal
+    vep = finding.get("vep") or {}
+    clnsig = (vep.get("clinvar") or {}).get("clnsig", "")
+    if clnsig in _PATHO_CLNSIGS:
+        return True
+    return False
+
+
+def _extract_vep_from_final_report(
+    final_data: Dict[str, Any],
+) -> Tuple[bool, Dict[str, Dict[str, Any]]]:
+    """
+    Extract VEP annotation map {CHROM:POS:REF:ALT → vep_dict} from final_report.
+    Returns (vep_annotated: bool, vep_map: dict).
+    """
+    vep_annotated = bool(
+        (final_data.get("report_metadata") or {}).get("vep_annotated")
+    )
+    vep_map: Dict[str, Dict[str, Any]] = {}
+    if not vep_annotated:
+        return False, vep_map
+
+    va = final_data.get("variant_analysis") or {}
+    for finding in va.get("clinical_findings") or []:
+        vep = finding.get("vep")
+        if not vep:
+            continue
+        key = (
+            f"{finding.get('chrom')}:{finding.get('pos')}"
+            f":{finding.get('ref')}:{finding.get('alt')}"
+        )
+        vep_map[key] = vep
+
+    logger.info(
+        "VEP annotation loaded from final_report: %d entries (vep_annotated=%s)",
+        len(vep_map),
+        vep_annotated,
+    )
+    return vep_annotated, vep_map
+
+
+def _build_finding_key(finding: Dict[str, Any]) -> str:
+    return (
+        f"{finding.get('chrom')}:{finding.get('pos')}"
+        f":{finding.get('ref')}:{finding.get('alt')}"
+    )
+
+
 def build_sample_result(sample_id: str, output_dir: Path) -> Dict[str, Any]:
     """Build a result dictionary for a single sample."""
     logger.info("Processing sample: %s", sample_id)
@@ -197,33 +286,16 @@ def build_sample_result(sample_id: str, output_dir: Path) -> Dict[str, Any]:
     else:
         result["fetal_fraction"] = None
 
-    # Variant Analysis
-    if files["variant_report"]:
-        data = load_json_safe(files["variant_report"])
-        if data:
-            variants = data.get("variants", [])
-            pathogenic = [
-                v for v in variants
-                if v.get("classification") in ("PATHOGENIC", "LIKELY_PATHOGENIC")
-            ]
-            result["variant_analysis"] = {
-                "total_target_loci": data.get("summary", {}).get("total_target_loci"),
-                "covered_loci": data.get("summary", {}).get("covered_loci"),
-                "total_variants": data.get("summary", {}).get("total_variants_detected"),
-                "fetal_variants": data.get("summary", {}).get("fetal_specific_variants"),
-                "pathogenic_variants": len(pathogenic),
-                "pathogenic_details": pathogenic[:10],  # Top 10 for summary
-            }
-            if pathogenic:
-                result["status_flags"].append("PATHOGENIC_VARIANT_DETECTED")
-    else:
-        result["variant_analysis"] = None
+    # ── Final report: load once, used for VEP + UPD ─────────────────────────
+    vep_annotated = False
+    vep_map: Dict[str, Dict[str, Any]] = {}
+    final_data: Optional[Dict[str, Any]] = None
 
-    # Final report path + pull UPD analysis from it
     if files["final_report"]:
         result["final_report_path"] = str(files["final_report"])
         final_data = load_json_safe(files["final_report"])
         if final_data:
+            vep_annotated, vep_map = _extract_vep_from_final_report(final_data)
             upd = final_data.get("upd_analysis")
             if upd:
                 result["upd_analysis"] = upd
@@ -232,6 +304,102 @@ def build_sample_result(sample_id: str, output_dir: Path) -> Dict[str, Any]:
                     result["status_flags"].append(f"UPD_SUSPECTED:{summary}")
                 elif summary == "INSUFFICIENT_INFORMATION":
                     result["status_flags"].append("UPD_INSUFFICIENT_INFO")
+
+    # ── Variant Analysis ─────────────────────────────────────────────────────
+    if files["variant_report"]:
+        data = load_json_safe(files["variant_report"])
+        if data:
+            summary_block = data.get("summary", {})
+            # clinical_findings is the primary list (variant_analysis.py output)
+            findings: List[Dict[str, Any]] = data.get("clinical_findings", [])
+
+            # Overlay VEP annotation from final_report when available
+            if vep_map:
+                for f in findings:
+                    key = _build_finding_key(f)
+                    if key in vep_map and "vep" not in f:
+                        f["vep"] = vep_map[key]
+
+            # Deduplicate findings by CHROM:POS:REF:ALT (same locus may appear
+            # in multiple target regions)
+            seen_keys: set = set()
+            deduped: List[Dict[str, Any]] = []
+            for f in findings:
+                k = _build_finding_key(f)
+                if k not in seen_keys:
+                    seen_keys.add(k)
+                    deduped.append(f)
+            findings = deduped
+
+            # Fetal-specific variants (paternal de novo / fetal-origin)
+            fetal_findings = [
+                f for f in findings if f.get("origin") in _FETAL_ORIGINS
+            ]
+
+            # Pathogenic variants (any origin)
+            pathogenic = [f for f in findings if _is_pathogenic_finding(f)]
+
+            # Build compact fetal detail (with VEP)
+            fetal_detail = []
+            for f in fetal_findings[:20]:  # cap at 20
+                entry = {
+                    "chrom":             f.get("chrom"),
+                    "pos":               f.get("pos"),
+                    "ref":               f.get("ref"),
+                    "alt":               f.get("alt"),
+                    "vaf":               f.get("vaf"),
+                    "depth":             f.get("depth"),
+                    "gene":              f.get("gene", ""),
+                    "disease":           f.get("disease", ""),
+                    "pathogenic_variant":f.get("pathogenic_variant", ""),
+                    "fetal_genotype":    f.get("fetal_genotype", ""),
+                    "maternal_genotype": f.get("maternal_genotype", ""),
+                    "confidence":        f.get("confidence", ""),
+                    "details":           f.get("details", ""),
+                }
+                vep_compact = _compact_vep(f.get("vep"))
+                if vep_compact:
+                    entry["vep"] = vep_compact
+                fetal_detail.append(entry)
+
+            # Build compact pathogenic detail (with VEP)
+            pathogenic_detail = []
+            for f in pathogenic[:10]:  # cap at 10
+                entry = {
+                    "chrom":             f.get("chrom"),
+                    "pos":               f.get("pos"),
+                    "ref":               f.get("ref"),
+                    "alt":               f.get("alt"),
+                    "vaf":               f.get("vaf"),
+                    "depth":             f.get("depth"),
+                    "origin":            f.get("origin", ""),
+                    "gene":              f.get("gene", ""),
+                    "disease":           f.get("disease", ""),
+                    "pathogenic_variant":f.get("pathogenic_variant", ""),
+                    "fetal_genotype":    f.get("fetal_genotype", ""),
+                    "maternal_genotype": f.get("maternal_genotype", ""),
+                    "confidence":        f.get("confidence", ""),
+                }
+                vep_compact = _compact_vep(f.get("vep"))
+                if vep_compact:
+                    entry["vep"] = vep_compact
+                pathogenic_detail.append(entry)
+
+            result["variant_analysis"] = {
+                "vep_annotated":      vep_annotated,
+                "total_target_loci":  summary_block.get("total_target_loci"),
+                "covered_loci":       summary_block.get("covered_loci"),
+                "total_variants":     summary_block.get("total_variants_analyzed"),
+                "fetal_variants":     summary_block.get("fetal_specific_variants"),
+                "pathogenic_variants":len(pathogenic),
+                "pathogenic_details": pathogenic_detail,
+                "fetal_specific_detail": fetal_detail,
+            }
+
+            if pathogenic:
+                result["status_flags"].append("PATHOGENIC_VARIANT_DETECTED")
+    else:
+        result["variant_analysis"] = None
 
     # Determine overall status
     if "FF_ESTIMATION_FAILED" in result["status_flags"]:
