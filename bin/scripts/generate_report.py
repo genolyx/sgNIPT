@@ -93,13 +93,27 @@ def parse_vep_vcf(vcf_path: str) -> Dict[str, Dict[str, Any]]:
                 else:
                     info[item] = "1"
 
-            # Parse first CSQ transcript block
+            # Parse all CSQ transcript blocks and pick the best one.
+            # Priority: MANE SELECT > Canonical > highest Impact > first block.
             csq_data: Dict[str, str] = {}
             csq_raw = info.get("CSQ", "")
             if csq_raw and csq_fields:
-                first_block = csq_raw.split(",")[0]
-                vals = first_block.split("|")
-                csq_data = dict(zip(csq_fields, vals + [""] * (len(csq_fields) - len(vals))))
+                _IMPACT_RANK = {"HIGH": 0, "MODERATE": 1, "LOW": 2, "MODIFIER": 3}
+                blocks: List[Dict[str, str]] = []
+                for raw_block in csq_raw.split(","):
+                    vals = raw_block.split("|")
+                    blocks.append(
+                        dict(zip(csq_fields, vals + [""] * (len(csq_fields) - len(vals))))
+                    )
+
+                def _block_sort_key(b: Dict[str, str]) -> tuple:
+                    # Lower value = higher priority
+                    is_mane     = 0 if b.get("MANE_SELECT", "") else 1
+                    is_canon    = 0 if b.get("CANONICAL", "") == "YES" else 1
+                    impact_rank = _IMPACT_RANK.get(b.get("IMPACT", ""), 4)
+                    return (is_mane, is_canon, impact_rank)
+
+                csq_data = sorted(blocks, key=_block_sort_key)[0]
 
             # ClinVar fields from VEP --custom (prefixed with "ClinVar_")
             clnsig = info.get("ClinVar_CLNSIG", csq_data.get("ClinVar_CLNSIG", ""))
@@ -391,17 +405,60 @@ def build_report_placeholders(report_json: Dict[str, Any]) -> Dict[str, str]:
         placeholders["Pathogenic Count"] = str(variant_data.get("pathogenic_variants", "0"))
 
         # Build variant detail table placeholders
+        # Source: daemon JSON samples[n].variant_analysis.pathogenic_details[]
         pathogenic = variant_data.get("pathogenic_details", [])
         for idx, var in enumerate(pathogenic[:10], start=1):
             prefix = f"Var{idx}"
-            placeholders[f"{prefix} Gene"] = str(var.get("gene", ""))
-            placeholders[f"{prefix} Position"] = str(var.get("position", ""))
-            placeholders[f"{prefix} Ref"] = str(var.get("ref", ""))
-            placeholders[f"{prefix} Alt"] = str(var.get("alt", ""))
-            placeholders[f"{prefix} AF"] = str(var.get("allele_frequency", ""))
-            placeholders[f"{prefix} Origin"] = str(var.get("origin", ""))
-            placeholders[f"{prefix} Classification"] = str(var.get("classification", ""))
-            placeholders[f"{prefix} Disease"] = str(var.get("disease", ""))
+            vep = var.get("vep") or {}
+            clinvar = vep.get("clinvar") or {}
+
+            # Gene: prefer VEP symbol, fallback to gene field
+            gene = vep.get("symbol") or var.get("gene", "")
+
+            # Variant notation: prefer HGVSc (without transcript prefix), fallback to chrom:pos ref>alt
+            raw_hgvsc = vep.get("hgvsc", "")
+            if raw_hgvsc:
+                # Strip "NM_xxx.x:" prefix → keep only "c.xxx" part
+                hgvsc = raw_hgvsc.split(":")[-1] if ":" in raw_hgvsc else raw_hgvsc
+            else:
+                chrom = str(var.get("chrom", ""))
+                pos   = str(var.get("pos", ""))
+                ref   = str(var.get("ref", ""))
+                alt   = str(var.get("alt", ""))
+                hgvsc = f"{chrom}:{pos} {ref}>{alt}" if chrom else ""
+
+            # HGVSp: strip transcript prefix → keep only "p.xxx" part
+            raw_hgvsp = vep.get("hgvsp", "")
+            hgvsp = raw_hgvsp.split(":")[-1] if ":" in raw_hgvsp else raw_hgvsp
+
+            # Transcript (MANE)
+            transcript = vep.get("mane", "")
+
+            # VAF
+            vaf = var.get("vaf")
+            vaf_str = f"{vaf:.1%}" if isinstance(vaf, float) else str(vaf or "")
+
+            # ClinVar classification
+            clnsig = clinvar.get("clnsig", "") or var.get("pathogenic_variant", "")
+
+            placeholders[f"{prefix} Gene"]           = gene
+            placeholders[f"{prefix} HGVSc"]          = hgvsc
+            placeholders[f"{prefix} HGVSp"]          = hgvsp
+            placeholders[f"{prefix} Transcript"]     = transcript
+            placeholders[f"{prefix} Consequence"]    = vep.get("consequence", "").replace("_variant", "").replace("_", " ")
+            placeholders[f"{prefix} VAF"]            = vaf_str
+            placeholders[f"{prefix} Origin"]         = var.get("origin", "")
+            placeholders[f"{prefix} Fetal GT"]       = var.get("fetal_genotype", "")
+            placeholders[f"{prefix} Maternal GT"]    = var.get("maternal_genotype", "")
+            placeholders[f"{prefix} ClinVar"]        = clnsig.replace("_", " ")
+            placeholders[f"{prefix} Disease"]        = clinvar.get("clndn", "") or var.get("disease", "")
+            placeholders[f"{prefix} Confidence"]     = var.get("confidence", "")
+            # Legacy keys kept for backward-compatible templates
+            placeholders[f"{prefix} Position"]       = f"{var.get('chrom', '')}:{var.get('pos', '')}"
+            placeholders[f"{prefix} Ref"]            = str(var.get("ref", ""))
+            placeholders[f"{prefix} Alt"]            = str(var.get("alt", ""))
+            placeholders[f"{prefix} AF"]             = vaf_str
+            placeholders[f"{prefix} Classification"] = clnsig.replace("_", " ")
 
     return placeholders
 
